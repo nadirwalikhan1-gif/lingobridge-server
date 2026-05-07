@@ -1,0 +1,31 @@
+﻿import { createClient } from '@supabase/supabase-js';
+import { logger } from './logger.mjs';
+
+const SUPABASE_URL         = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+  throw new Error('Missing SUPABASE_URL or SUPABASE_SERVICE_KEY in environment');
+}
+
+export const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
+  auth: {
+    autoRefreshToken:   false,
+    persistSession:     false,
+    detectSessionInUrl: false,
+  },
+});
+
+export async function verifySupabaseToken(token) {
+  try {
+    const { data, error } = await supabaseAdmin.auth.getUser(token);
+    if (error || !data?.user) {
+      logger.debug({ error }, 'Token verification failed');
+      return null;
+    }
+    return data.user;
+  } catch (err) {
+    logger.error({ err }, 'Unexpected error during token verification');
+    return null;
+  }
+}
