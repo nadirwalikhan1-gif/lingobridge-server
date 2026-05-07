@@ -1,4 +1,5 @@
-﻿import { createClient } from '@supabase/supabase-js';
+import { createClient } from '@supabase/supabase-js';
+import ws from 'ws';
 import { logger } from './logger.mjs';
 
 const SUPABASE_URL         = process.env.SUPABASE_URL;
@@ -13,6 +14,9 @@ export const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
     autoRefreshToken:   false,
     persistSession:     false,
     detectSessionInUrl: false,
+  },
+  realtime: {
+    transport: ws,
   },
 });
 
