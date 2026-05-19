@@ -21,7 +21,8 @@ export async function createSocketServer(httpServer) {
     cors: {
       // FIX: Allow all origins in dev, strict whitelist in production
       origin: (origin, callback) => {
-        if (!origin || isDev || ALLOWED_ORIGINS.includes(origin)) {
+        if (!origin || isDev || ALLOWED_ORIGINS.includes(origin) || origin.endsWith('.vercel.app')) {
+       callback(null, true);
           callback(null, true);
         } else {
           logger.warn({ origin, allowed: ALLOWED_ORIGINS }, 'Socket.IO CORS blocked');

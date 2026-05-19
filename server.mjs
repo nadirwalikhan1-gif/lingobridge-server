@@ -53,7 +53,7 @@ app.use(cors({
     // In development, allow all
     if (isDev) return cb(null, true);
     // In production, check against whitelist
-    if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+  if (ALLOWED_ORIGINS.includes(origin) || origin.endsWith('.vercel.app')) return cb(null, true);
     logger.warn({ origin, allowed: ALLOWED_ORIGINS }, 'CORS blocked');
     cb(new Error('Not allowed by CORS'));
   },
@@ -142,4 +142,4 @@ async function start() {
 start().catch((err) => {
   logger.fatal({ err }, 'Server failed to start');
   process.exit(1);
-});
+});''
