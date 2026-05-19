@@ -10,9 +10,9 @@
     "dev": "node --watch server.mjs"
   },
   "dependencies": {
-    "@socket.io/redis-adapter": "^8.3.0",
+    "@lemonsqueezy/lemonsqueezy.js": "^4.0.0",
+    "@socket.io/redis-adapter": "^8.2.1",
     "@supabase/supabase-js": "^2.105.3",
-    "agora-access-token": "^2.0.4",
     "agora-token": "^2.0.5",
     "cors": "^2.8.6",
     "dotenv": "^16.6.1",
@@ -23,7 +23,7 @@
     "pino": "^9.14.0",
     "pino-pretty": "^11.3.0",
     "redis": "^5.12.1",
-    "socket.io": "^4.8.3",
-    "ws": "^8.20.0"
+    "socket.io": "^4.2.0",
+    "uuid": "^14.0.0"
   }
 }
