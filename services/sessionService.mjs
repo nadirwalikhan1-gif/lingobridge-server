@@ -7,7 +7,8 @@ import {
   getStaleSessions,
 } from '../db/sessionRepo.mjs';
 import { deductWallet, releaseReservation } from '../db/walletRepo.mjs';
-import { calculateCost } from './billingService.mjs';
+// FIX: import from utils instead of billingService (breaks circular dependency)
+import { calculateCost } from '../utils/billing.mjs';
 import { RESERVATION_AMOUNT } from '../utils/constants.mjs';
 
 /**
@@ -39,13 +40,11 @@ export async function endSession(sessionId, reason = 'completed') {
     return null;
   }
 
-  // Prevent double-processing
   if (['completed', 'cancelled', 'failed'].includes(session.status)) {
     logger.warn({ sessionId, status: session.status }, 'Session already ended');
     return session;
   }
 
-  // Never started — cancel and release reservation
   if (!session.started_at || session.status === 'pending') {
     const reservedAmount = RESERVATION_AMOUNT[session.currency || 'USD']?.[session.session_type] ?? 18.00;
     await releaseReservation(session.client_id, reservedAmount).catch(() => {});
@@ -57,7 +56,6 @@ export async function endSession(sessionId, reason = 'completed') {
     return null;
   }
 
-  // Calculate final cost
   const { rawSeconds, cost } = calculateCost(
     session.started_at,
     session.currency || 'USD',
@@ -66,7 +64,6 @@ export async function endSession(sessionId, reason = 'completed') {
 
   const durationMinutes = Math.ceil(rawSeconds / 60);
 
-  // Update duration fields immediately
   await updateSessionStatus(sessionId, session.status, {
     raw_duration_sec: rawSeconds,
     duration_minutes: durationMinutes,
@@ -74,7 +71,6 @@ export async function endSession(sessionId, reason = 'completed') {
     ...(reason === 'force' ? { force_ended_at: new Date().toISOString() } : {}),
   });
 
-  // Atomic wallet deduction via DB function
   try {
     const result = await deductWallet(
       session.client_id,

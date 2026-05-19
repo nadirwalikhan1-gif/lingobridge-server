@@ -1,10 +1,19 @@
+// ── FATAL ERROR HANDLERS — must be first, before any imports ──
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason);
+});
+
 import 'dotenv/config';
 import { createServer } from 'http';
 import { randomUUID } from 'crypto';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
-import rateLimit from 'express-rate-limit';
 
 import { logger } from './config/logger.mjs';
 import { connectRedis } from './config/redis.mjs';
@@ -18,13 +27,13 @@ import agoraRouter    from './routes/agora.mjs';
 import healthRouter   from './routes/health.mjs';
 
 const PORT            = process.env.PORT || 3001;
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'http://localhost:5174').split(',');
+// FIX: Default includes production client + common dev ports
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'https://lingobridge-client.vercel.app,http://localhost:5173,http://localhost:5174').split(',').map(s => s.trim()).filter(Boolean);
 const REQUEST_TIMEOUT = parseInt(process.env.REQUEST_TIMEOUT_MS, 10) || 30000;
 
 const app = express();
 
 // ── REQUEST CONTEXT ──────────────────────────────────────────
-// Inject request ID for distributed tracing across all logs
 app.use((req, _res, next) => {
   req.id = req.headers['x-request-id'] || randomUUID();
   req.log = logger.child({ requestId: req.id });
@@ -35,31 +44,27 @@ app.use((req, _res, next) => {
 app.use(helmet());
 app.set('trust proxy', 1);
 
+// FIX: CORS — allow all origins in development, strict in production
+const isDev = process.env.NODE_ENV !== 'production';
 app.use(cors({
   origin: (origin, cb) => {
-    if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
-    req.log.warn({ origin }, 'CORS blocked');
+    // Allow requests with no origin (mobile apps, curl, etc.)
+    if (!origin) return cb(null, true);
+    // In development, allow all
+    if (isDev) return cb(null, true);
+    // In production, check against whitelist
+    if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+    logger.warn({ origin, allowed: ALLOWED_ORIGINS }, 'CORS blocked');
     cb(new Error('Not allowed by CORS'));
   },
-  methods: ['GET', 'POST'],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  credentials: true,
 }));
 
-// TODO: For multi-instance deployments, swap to RedisStore:
-// import { RedisStore } from 'rate-limit-redis';
-app.use(rateLimit({
-  windowMs: 60 * 1000,
-  max:      100,
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req) => req.ip,
-  handler: (req, res) => {
-    req.log.warn({ ip: req.ip }, 'Rate limit exceeded');
-    res.status(429).json({ error: 'Too many requests — slow down' });
-  },
-}));
+// FIX: Removed express-rate-limit (not in package.json) — add back after npm install
+// app.use(rateLimit({...}));
 
 // ── BODY PARSERS ─────────────────────────────────────────────
-// Raw body for webhook signature verification (MUST be before express.json)
 app.use('/webhook', (req, res, next) => {
   let raw = '';
   let failed = false;
@@ -76,7 +81,6 @@ app.use('/webhook', (req, res, next) => {
     }
   });
 
-  // FIX: Stream errors no longer hang the request
   req.on('error', (err) => {
     failed = true;
     req.log.error({ err }, 'Raw body stream error');
@@ -102,7 +106,6 @@ app.use((req, res) => {
 
 // Global error handler
 app.use((err, req, res, next) => {
-  // FIX: Prevent "Cannot set headers after they are sent" crash
   if (res.headersSent) {
     req.log.error({ err }, 'Error after response sent');
     return next(err);
@@ -120,7 +123,6 @@ app.use((err, req, res, next) => {
 // ── STARTUP ──────────────────────────────────────────────────
 const httpServer = createServer(app);
 
-// FIX: Prevent connections from hanging indefinitely
 httpServer.requestTimeout = REQUEST_TIMEOUT;
 httpServer.headersTimeout = REQUEST_TIMEOUT;
 
@@ -133,6 +135,7 @@ async function start() {
   httpServer.listen(PORT, () => {
     logger.info(`Server running — http://localhost:${PORT}`);
     logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
+    logger.info(`Allowed origins: ${ALLOWED_ORIGINS.join(', ')}`);
   });
 }
 

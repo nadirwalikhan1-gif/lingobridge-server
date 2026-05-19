@@ -17,31 +17,18 @@ const SCHEMAS = {
   'end-call': {
     roomId: (v) => typeof v !== 'string' || !v.trim() ? 'must be a non-empty string' : null,
   },
+  // FIX: add schema for new-request event
+  'new-request': {
+    roomId:    (v) => typeof v !== 'string' || !v.trim() ? 'must be a non-empty string' : null,
+    language:  (v) => typeof v !== 'string' || !v.trim() ? 'must be a non-empty string' : null,
+    type:      (v) => !['audio', 'video'].includes(v)    ? 'must be "audio" or "video"'  : null,
+  },
 };
 
-/**
- * Validate a socket event payload against a named schema.
- *
- * FIX: acceptHandler called validateEvent('accept-call', data) expecting
- * { valid, errors, sanitized } but the old implementation was a factory
- * (validateEvent(schema, handler) => wrappedFn). Calling convention mismatch
- * caused "valid is not defined" crashes on every accept/end-call event.
- *
- * This version is a direct validator — call it inline, check the result.
- *
- * Usage:
- *   const { valid, errors, sanitized } = validateEvent('accept-call', data);
- *   if (!valid) { socket.emit('error', { errors }); return; }
- *
- * @param {string} eventName
- * @param {*}      data        — raw socket payload
- * @returns {{ valid: boolean, errors: string[], sanitized: object }}
- */
 export function validateEvent(eventName, data) {
   const schema = SCHEMAS[eventName];
 
   if (!schema) {
-    // No schema registered — pass through
     return { valid: true, errors: [], sanitized: data ?? {} };
   }
 
@@ -65,7 +52,6 @@ export function validateEvent(eventName, data) {
     }
   }
 
-  // Pass through any extra fields that aren't in the schema
   for (const [key, value] of Object.entries(data)) {
     if (!(key in schema)) sanitized[key] = value;
   }

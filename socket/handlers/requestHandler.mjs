@@ -1,10 +1,15 @@
 import { logger } from '../../config/logger.mjs';
 import { generateChannelName } from '../../services/agoraService.mjs';
 import { addRoom, getRoom } from '../runtime/sessionRuntime.mjs';
+import { validateEvent } from '../../middleware/validateEvent.mjs';
 
 export function requestHandler(io, socket) {
   socket.on('new-request', (data) => {
-    const { roomId, language, type: sessionType, purpose } = data;
+    // FIX: add validation for new-request event
+    const { valid, errors, sanitized } = validateEvent('request-call', data);
+    if (!valid) { socket.emit('error', { errors }); return; }
+
+    const { roomId, language, type: sessionType, purpose } = sanitized;
 
     if (getRoom(roomId)) return;
 
@@ -15,11 +20,11 @@ export function requestHandler(io, socket) {
       clientUserId:        socket.userId || 'demo-client',
       interpreterSocketId: null,
       sessionId:           null,
-      requestData:         { ...data, channelName },
+      requestData:         { ...sanitized, channelName },
     });
 
     io.to('interpreters').emit('incoming-request', {
-      ...data,
+      ...sanitized,
       roomId,
       channelName,
     });

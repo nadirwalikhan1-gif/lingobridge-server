@@ -1,5 +1,5 @@
-﻿import AgoraToken from 'agora-access-token';
-const { RtcTokenBuilder, RtcRole } = AgoraToken;
+﻿import pkg from 'agora-token';
+const { RtcTokenBuilder, RtcRole } = pkg;
 import { logger } from '../config/logger.mjs';
 
 const APP_ID          = process.env.AGORA_APP_ID;

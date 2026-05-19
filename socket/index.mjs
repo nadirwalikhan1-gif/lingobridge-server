@@ -1,6 +1,6 @@
 import { Server } from 'socket.io';
 import { authSocketMiddleware } from '../middleware/authSocket.mjs';
-import { registerHandler }  from './handlers/registerHandler.mjs';
+import { requestHandler as registerHandler }  from './handlers/registerHandler.mjs';
 import { requestHandler }   from './handlers/requestHandler.mjs';
 import { acceptHandler }    from './handlers/acceptHandler.mjs';
 import { endCallHandler }   from './handlers/endCallHandler.mjs';
@@ -10,11 +10,26 @@ import { eventBus, EVENTS } from '../utils/eventBus.mjs';
 import { SOCKET_EVENTS }    from '../utils/constants.mjs';
 
 export async function createSocketServer(httpServer) {
- const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'https://lingobridge-tau.vercel.app').split(',');
+  // FIX: Match server.mjs CORS config exactly
+  const isDev = process.env.NODE_ENV !== 'production';
+  const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'https://lingobridge-client.vercel.app,http://localhost:5173,http://localhost:5174')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+
   const io = new Server(httpServer, {
     cors: {
-      origin:  ALLOWED_ORIGINS,
+      // FIX: Allow all origins in dev, strict whitelist in production
+      origin: (origin, callback) => {
+        if (!origin || isDev || ALLOWED_ORIGINS.includes(origin)) {
+          callback(null, true);
+        } else {
+          logger.warn({ origin, allowed: ALLOWED_ORIGINS }, 'Socket.IO CORS blocked');
+          callback(new Error('Not allowed by CORS'));
+        }
+      },
       methods: ['GET', 'POST'],
+      credentials: true, // FIX: Required for auth cookies/tokens
     },
     pingTimeout:  20000,
     pingInterval: 10000,
@@ -35,7 +50,8 @@ export async function createSocketServer(httpServer) {
   }
 
   // ── Auth middleware ───────────────────────────────────────
-    // // // // io.use(authSocketMiddleware);
+  io.use(authSocketMiddleware);
+
   // ── Connection ────────────────────────────────────────────
   io.on('connection', (socket) => {
     logger.info({ socketId: socket.id, userId: socket.userId }, 'Socket connected');
@@ -47,12 +63,7 @@ export async function createSocketServer(httpServer) {
   });
 
   // ── Real-time wallet balance push ─────────────────────────
-  // When paymentService credits a wallet, eventBus emits WALLET_CREDITED.
-  // We find the socket(s) for that userId and push the updated balance.
-  // This works for single-instance. For multi-instance + Redis adapter,
-  // replace with io.serverSideEmit or a Redis pub/sub channel.
   eventBus.on(EVENTS.WALLET_CREDITED, ({ userId, balance, reservedBalance, availableBalance, currency }) => {
-    // Find all sockets belonging to this user
     let pushed = 0;
     for (const [, socket] of io.sockets.sockets) {
       if (socket.userId === userId) {
