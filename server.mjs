@@ -5,7 +5,13 @@ process.on('uncaughtException', (err) => {
 });
 
 process.on('unhandledRejection', (reason) => {
+  // engine.io polling race condition — safe to ignore
+  if (reason instanceof TypeError && reason.message.includes('writeHead')) {
+    console.warn('[unhandledRejection] Suppressed engine.io writeHead race:', reason.message);
+    return;
+  }
   console.error('[unhandledRejection]', reason);
+  // optionally process.exit(1) for other truly fatal rejections
 });
 
 import 'dotenv/config';
