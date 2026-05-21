@@ -18,21 +18,24 @@ export async function createSocketServer(httpServer) {
     .filter(Boolean);
 
   const io = new Server(httpServer, {
-    cors: {
-      // FIX: Allow all origins in dev, strict whitelist in production
-      origin: (origin, callback) => {
-        if (!origin || isDev || ALLOWED_ORIGINS.includes(origin) || origin.endsWith('.vercel.app')) {
-       callback(null, true);
-        } else {
-          logger.warn({ origin, allowed: ALLOWED_ORIGINS }, 'Socket.IO CORS blocked');
-          callback(new Error('Not allowed by CORS'));
-        }
-      },
-      methods: ['GET', 'POST'],
-      credentials: true, // FIX: Required for auth cookies/tokens
-    },
-    pingTimeout:  20000,
-    pingInterval: 10000,
+   cors: {
+  origin: (origin, callback) => {
+    try {
+      if (!origin || isDev || ALLOWED_ORIGINS.includes(origin) || origin.endsWith('.vercel.app')) {
+        callback(null, true);
+      } else {
+        logger.warn({ origin, allowed: ALLOWED_ORIGINS }, 'Socket.IO CORS blocked');
+        callback(new Error('Not allowed by CORS'));
+      }
+    } catch (e) {
+      // ignore
+    }
+  },
+  methods: ['GET', 'POST'],
+  credentials: true,
+},
+pingTimeout:  20000,
+pingInterval: 10000,
   });
 
   // ── Redis adapter (optional) ──────────────────────────────
