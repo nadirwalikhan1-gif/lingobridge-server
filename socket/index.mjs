@@ -23,7 +23,6 @@ export async function createSocketServer(httpServer) {
       origin: (origin, callback) => {
         if (!origin || isDev || ALLOWED_ORIGINS.includes(origin) || origin.endsWith('.vercel.app')) {
        callback(null, true);
-          callback(null, true);
         } else {
           logger.warn({ origin, allowed: ALLOWED_ORIGINS }, 'Socket.IO CORS blocked');
           callback(new Error('Not allowed by CORS'));
