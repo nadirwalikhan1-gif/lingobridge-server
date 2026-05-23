@@ -22,11 +22,9 @@ export const BILLING_RATES = {
  * Reservation amounts (held when call is requested, released if not accepted)
  */
 export const RESERVATION_AMOUNT = {
-  USD: { audio: 9.00,  video: 18.00 },
-  GBP: { audio: 7.50,  video: 15.00 },
-  CAD: { audio: 10.00, video: 20.00 },
-  EUR: { audio: 8.00,  video: 16.00 },
-  AUD: { audio: 11.00, video: 22.00 },
+  USD: { audio: 0,  video: 0 },
+  GBP: { audio: 0,  video: 0 },
+  CAD: { audio: 0, video: 0 },
 };
 
 /**

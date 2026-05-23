@@ -3,6 +3,7 @@ import { rateLimitSocket } from '../../middleware/rateLimiter.mjs';
 import { getRoom, updateRoom, deleteRoom } from '../runtime/sessionRuntime.mjs';
 import { activateSession, updateSessionStatus } from '../../db/sessionRepo.mjs';
 import { releaseReservation } from '../../db/walletRepo.mjs';
+import { generateAgoraToken } from '../../services/agoraService.mjs';
 import { eventBus, EVENTS } from '../../utils/eventBus.mjs';
 import { logger } from '../../config/logger.mjs';
 
@@ -18,7 +19,6 @@ export function acceptHandler(io, socket) {
       return;
     }
 
-    // ── AUTH GUARD ── CRITICAL FIX: removed 'demo-client' fallback
     const interpreterId = socket.userId;
     if (!interpreterId) {
       socket.emit('error', { code: 'AUTH_REQUIRED', message: 'Authentication required' });
@@ -45,21 +45,51 @@ export function acceptHandler(io, socket) {
       // Update runtime
       updateRoom(roomId, { interpreterSocketId: socket.id, interpreterUserId: interpreterId });
 
-      // Join room
+      // Join socket.io room
       socket.join(roomId);
 
-      // Notify client
+      const channelName = room.channelName ?? roomId;
+
+      // Generate Agora tokens for both parties
+      let clientToken = null;
+      let interpreterToken = null;
+      try {
+        [clientToken, interpreterToken] = await Promise.all([
+          generateAgoraToken(channelName, room.clientUserId),
+          generateAgoraToken(channelName, interpreterId),
+        ]);
+      } catch (e) {
+        logger.warn({ e }, 'Agora token generation failed on accept — parties will retry');
+      }
+
+      // Notify client with channelName + token
       io.to(room.clientSocketId).emit('call-accepted', {
         roomId,
         interpreterId,
-        sessionId: room.sessionId,
+        sessionId:   room.sessionId,
+        channelName,
+        agoraToken:  clientToken,
       });
 
-      // Notify interpreter
+      // Notify accepting interpreter with channelName + token
       socket.emit('call-accepted', {
         roomId,
-        clientId: room.clientUserId,
-        sessionId: room.sessionId,
+        clientId:   room.clientUserId,
+        sessionId:  room.sessionId,
+        channelName,
+        agoraToken: interpreterToken,
+      });
+
+      // FIX: Notify ALL other interpreters to remove this card from their dashboard
+      socket.to('interpreters').emit('request-cancelled', { roomId });
+
+      // FIX: Notify admins that the request was accepted
+      io.to('admins').emit('call-accepted', {
+        roomId,
+        interpreterId,
+        clientId:   room.clientUserId,
+        sessionId:  room.sessionId,
+        channelName,
       });
 
       logger.info({ roomId, interpreterId, clientId: room.clientUserId }, 'Call accepted');
@@ -69,6 +99,7 @@ export function acceptHandler(io, socket) {
     }
   });
 
+  // ── CLIENT CANCELS REQUEST ────────────────────────────────────
   socket.on('reject-call', async (data) => {
     const { roomId } = data || {};
     if (!roomId) return;
@@ -76,27 +107,25 @@ export function acceptHandler(io, socket) {
     const room = getRoom(roomId);
     if (!room) return;
 
-    // Only client can reject (cancel) their own request
+    // Only the client (caller) can cancel their own request
     if (socket.userId !== room.clientUserId) {
       socket.emit('error', { code: 'FORBIDDEN', message: 'Cannot reject this call' });
       return;
     }
 
     try {
-      // Release reservation
       await releaseReservation(room.clientUserId, room.reservedAmount);
       eventBus.emit(EVENTS.WALLET_CREDITED, { userId: room.clientUserId });
 
-      // Update DB
       await updateSessionStatus(room.sessionId, 'cancelled', { ended_at: new Date().toISOString() });
 
-      // Notify interpreters
-      io.emit('request-cancelled', { roomId });
+      // Notify interpreters and admins so they remove the card from their dashboard
+      io.to('interpreters').emit('request-cancelled', { roomId });
+      io.to('admins').emit('request-cancelled', { roomId });
 
-      // Clean up runtime
       deleteRoom(roomId);
 
-      logger.info({ roomId, userId: socket.userId }, 'Call rejected by client');
+      logger.info({ roomId, userId: socket.userId }, 'Call rejected/cancelled by client');
     } catch (err) {
       logger.error({ err, roomId }, 'reject-call failed');
     }

@@ -1,85 +1,86 @@
-import { v4 as uuidv4 } from 'uuid';
-import { validateEvent } from '../../middleware/validateEvent.mjs';
-import { rateLimitSocket } from '../../middleware/rateLimiter.mjs';
-import { addRoom, getRoom } from '../runtime/sessionRuntime.mjs';
-import { createSession } from '../../db/sessionRepo.mjs';
-import { reserveFunds } from '../../db/walletRepo.mjs';
-import { getAvailableBalance } from '../../db/walletRepo.mjs';
-import { RESERVATION_AMOUNT } from '../../utils/constants.mjs';
-import { eventBus, EVENTS } from '../../utils/eventBus.mjs';
 import { logger } from '../../config/logger.mjs';
+import { setInterpreterAvailability } from '../../db/interpreterRepo.mjs';
+import { getPendingRooms } from '../runtime/sessionRuntime.mjs';
 
+/**
+ * registerHandler.mjs
+ *
+ * Handles interpreter online/offline registration via explicit 'register' event.
+ * NOTE: Role-based room joining also happens automatically in index.mjs on connect,
+ * so interpreters receive broadcasts even without emitting 'register'.
+ * This handler exists for:
+ *   - DB availability toggling
+ *   - Manual go-offline toggle
+ *   - Legacy clients that emit 'register' explicitly
+ */
 export function requestHandler(io, socket) {
-  socket.on('request-call', async (data) => {
-    // Rate limit
-    if (!rateLimitSocket(socket, 'request-call', { max: 3, windowMs: 10_000 })) return;
+  // ── REGISTER (interpreter / client comes online) ──────────────
+  socket.on('register', async (data) => {
+    const role = data?.role;
 
-    // Validate payload
-    const { valid, errors, sanitized } = validateEvent('request-call', data);
-    if (!valid) {
-      socket.emit('error', { code: 'VALIDATION_ERROR', errors });
-      return;
-    }
+    if (role === 'interpreter') {
+      // Ensure room membership (idempotent — safe to call multiple times)
+      socket.join('interpreters');
+      socket.interpreterRole = true;
 
-    // ── AUTH GUARD ── CRITICAL FIX: removed 'demo-client' fallback
-    const userId = socket.userId;
-    if (!userId) {
-      socket.emit('error', { code: 'AUTH_REQUIRED', message: 'Authentication required' });
-      return;
-    }
-
-    const { language, sessionType } = sanitized;
-    const roomId = uuidv4();
-
-    try {
-      // Check wallet balance
-      const wallet = await getAvailableBalance(userId);
-      const reserve = RESERVATION_AMOUNT[wallet.currency]?.[sessionType] ?? 18.00;
-
-      if (wallet.availableBalance < reserve) {
-        socket.emit('error', {
-          code: 'INSUFFICIENT_FUNDS',
-          message: `Need ${reserve} ${wallet.currency} to start a ${sessionType} call.`,
-        });
-        return;
+      // Persist availability in DB (best-effort)
+      if (socket.userId) {
+        await setInterpreterAvailability(socket.userId, true).catch((err) =>
+          logger.warn({ err, userId: socket.userId }, 'setInterpreterAvailability failed')
+        );
       }
 
-      // Reserve funds
-      await reserveFunds(userId, reserve);
-      eventBus.emit(EVENTS.WALLET_CREDITED, { userId, ...await getAvailableBalance(userId) });
+      // Replay any pending rooms so the dashboard is not empty on load
+      const pending = getPendingRooms();
+      if (pending.length > 0) {
+        socket.emit('pending-requests', pending);
+      }
 
-      // Create DB session
-      const session = await createSession({
-        clientId:     userId,
-        language,
-        purpose:      'general',
-        sessionType,
-        currency:     wallet.currency,
-        agoraChannel: roomId,
-      });
-
-      // Add to runtime
-      addRoom(roomId, {
-        clientSocketId: socket.id,
-        clientUserId:   userId,
-        sessionId:      session.id,
-        reservedAmount: reserve,
-        requestData:    { language, sessionType, roomId },
-      });
-
-      // Join room
-      socket.join(roomId);
-
-      // Emit to client
-      socket.emit('call-requested', { roomId, sessionId: session.id });
-
-      // Broadcast to interpreters
-      io.emit('new-request', { roomId, language, type: sessionType });
-
-      logger.info({ roomId, userId, language, sessionType }, 'Call requested');
-    } catch (err) {
-      logger.error({ err, roomId, userId }, 'request-call failed');
-      socket.emit('error', { code: 'SERVER_ERROR', message: 'Failed to create call request' });
+      logger.info(
+        { socketId: socket.id, userId: socket.userId, pendingSent: pending.length },
+        'Interpreter registered via event'
+      );
     }
+
+    if (role === 'client') {
+      socket.clientRole = true;
+      logger.info({ socketId: socket.id, userId: socket.userId }, 'Client registered');
+    }
+  });
+
+  // ── GO OFFLINE (interpreter manually toggles off) ────────────
+  socket.on('go-offline', async () => {
+    if (!socket.interpreterRole) return;
+
+    socket.leave('interpreters');
+    socket.interpreterRole = false;
+
+    if (socket.userId) {
+      await setInterpreterAvailability(socket.userId, false).catch((err) =>
+        logger.warn({ err, userId: socket.userId }, 'setInterpreterAvailability(offline) failed')
+      );
+    }
+
+    logger.info({ socketId: socket.id, userId: socket.userId }, 'Interpreter went offline');
+  });
+
+  // ── GO ONLINE (interpreter manually toggles back on) ─────────
+  socket.on('go-online', async () => {
+    socket.join('interpreters');
+    socket.interpreterRole = true;
+
+    if (socket.userId) {
+      await setInterpreterAvailability(socket.userId, true).catch((err) =>
+        logger.warn({ err, userId: socket.userId }, 'setInterpreterAvailability(online) failed')
+      );
+    }
+
+    // Replay pending requests
+    const pending = getPendingRooms();
+    if (pending.length > 0) {
+      socket.emit('pending-requests', pending);
+    }
+
+    logger.info({ socketId: socket.id, userId: socket.userId }, 'Interpreter came back online');
   });
 }
