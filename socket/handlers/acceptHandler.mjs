@@ -73,14 +73,15 @@ interpreterToken = interpreterResult.token;
         agoraToken:  clientToken,
       });
 
-      // Notify accepting interpreter with channelName + token
-      socket.emit('call-accepted', {
-        roomId,
-        clientId:   room.clientUserId,
-        sessionId:  room.sessionId,
-        channelName,
-        agoraToken: interpreterToken,
-      });
+    // Notify accepting interpreter with channelName + token
+socket.emit('call-accepted', {
+  roomId,
+  clientId:    room.clientUserId,
+  sessionId:   room.sessionId,
+  channelName,
+  agoraToken:  interpreterToken,
+  sessionType: room.requestData?.sessionType ?? 'audio',  // ← add this
+});
 
       // FIX: Notify ALL other interpreters to remove this card from their dashboard
       socket.to('interpreters').emit('request-cancelled', { roomId });
