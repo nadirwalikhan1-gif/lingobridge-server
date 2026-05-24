@@ -4,6 +4,8 @@ import { logger } from '../config/logger.mjs';
 
 const APP_ID          = process.env.AGORA_APP_ID;
 const APP_CERTIFICATE = process.env.AGORA_APP_CERTIFICATE;
+console.log('AGORA_APP_ID first 6:', APP_ID?.substring(0, 6));
+console.log('AGORA_APP_CERTIFICATE first 6:', APP_CERTIFICATE?.substring(0, 6));
 const TOKEN_EXPIRY_SECONDS = 3600;
 
 if (!APP_ID || !APP_CERTIFICATE) {
