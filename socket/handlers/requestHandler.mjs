@@ -76,7 +76,8 @@ export function requestHandler(io, socket) {
       // Generate Agora token for the client
       let agoraToken = null;
       try {
-        agoraToken = await generateAgoraToken(roomId, userId);
+    const result = generateAgoraToken(roomId, userId);
+agoraToken = result.token;
       } catch (e) {
         logger.warn({ e }, 'Agora token generation failed — client will retry');
       }

@@ -54,10 +54,12 @@ export function acceptHandler(io, socket) {
       let clientToken = null;
       let interpreterToken = null;
       try {
-        [clientToken, interpreterToken] = await Promise.all([
-          generateAgoraToken(channelName, room.clientUserId),
-          generateAgoraToken(channelName, interpreterId),
-        ]);
+       const [clientResult, interpreterResult] = await Promise.all([
+  generateAgoraToken(channelName, room.clientUserId),
+  generateAgoraToken(channelName, interpreterId),
+]);
+clientToken = clientResult.token;
+interpreterToken = interpreterResult.token;
       } catch (e) {
         logger.warn({ e }, 'Agora token generation failed on accept — parties will retry');
       }
