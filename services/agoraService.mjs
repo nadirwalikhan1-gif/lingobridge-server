@@ -18,11 +18,7 @@ export function generateAgoraToken(channelName, uid = 0, role = 'publisher') {
   }
   const rtcRole = role === 'subscriber' ? RtcRole.SUBSCRIBER : RtcRole.PUBLISHER;
   const expiresAt = Math.floor(Date.now() / 1000) + TOKEN_EXPIRY_SECONDS;
-  // Change this:
-const token = RtcTokenBuilder.buildTokenWithUid(APP_ID, APP_CERTIFICATE, channelName, uid, rtcRole, expiresAt, expiresAt);
-
-// To this — always use uid=0:
-const token = RtcTokenBuilder.buildTokenWithUid(APP_ID, APP_CERTIFICATE, channelName, 0, rtcRole, expiresAt, expiresAt);
+  const token = RtcTokenBuilder.buildTokenWithUid(APP_ID, APP_CERTIFICATE, channelName, 0, rtcRole, expiresAt, expiresAt);
   return { token, appId: APP_ID, channel: channelName, uid, expiresAt };
 }
 
