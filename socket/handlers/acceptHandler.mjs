@@ -49,44 +49,46 @@ export function acceptHandler(io, socket) {
       socket.join(roomId);
 
       const channelName = room.channelName ?? roomId;
+      const sessionType = room.requestData?.sessionType ?? 'audio';
 
       // Generate Agora tokens for both parties
       let clientToken = null;
       let interpreterToken = null;
       try {
-       const [clientResult, interpreterResult] = await Promise.all([
-  generateAgoraToken(channelName, room.clientUserId),
-  generateAgoraToken(channelName, interpreterId),
-]);
-clientToken = clientResult.token;
-interpreterToken = interpreterResult.token;
+        const [clientResult, interpreterResult] = await Promise.all([
+          generateAgoraToken(channelName, room.clientUserId),
+          generateAgoraToken(channelName, interpreterId),
+        ]);
+        clientToken = clientResult.token;
+        interpreterToken = interpreterResult.token;
       } catch (e) {
         logger.warn({ e }, 'Agora token generation failed on accept — parties will retry');
       }
 
-      // Notify client with channelName + token
+      // Notify client with channelName + token + sessionType
       io.to(room.clientSocketId).emit('call-accepted', {
         roomId,
         interpreterId,
         sessionId:   room.sessionId,
         channelName,
         agoraToken:  clientToken,
+        sessionType,
       });
 
-    // Notify accepting interpreter with channelName + token
-socket.emit('call-accepted', {
-  roomId,
-  clientId:    room.clientUserId,
-  sessionId:   room.sessionId,
-  channelName,
-  agoraToken:  interpreterToken,
-  sessionType: room.requestData?.sessionType ?? 'audio',  // ← add this
-});
+      // Notify accepting interpreter with channelName + token + sessionType
+      socket.emit('call-accepted', {
+        roomId,
+        clientId:    room.clientUserId,
+        sessionId:   room.sessionId,
+        channelName,
+        agoraToken:  interpreterToken,
+        sessionType,
+      });
 
-      // FIX: Notify ALL other interpreters to remove this card from their dashboard
+      // Notify ALL other interpreters to remove this card from their dashboard
       socket.to('interpreters').emit('request-cancelled', { roomId });
 
-      // FIX: Notify admins that the request was accepted
+      // Notify admins that the request was accepted
       io.to('admins').emit('call-accepted', {
         roomId,
         interpreterId,
