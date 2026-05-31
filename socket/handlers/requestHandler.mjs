@@ -38,7 +38,6 @@ export function requestHandler(io, socket) {
       let reserve = 0;
 
       if (!FREE_CALL_TESTING) {
-        // Check wallet balance
         wallet = await getAvailableBalance(userId);
         reserve = RESERVATION_AMOUNT[wallet.currency]?.[sessionType] ?? 18.00;
 
@@ -50,11 +49,9 @@ export function requestHandler(io, socket) {
           return;
         }
 
-        // Reserve funds
         await reserveFunds(userId, reserve);
         eventBus.emit(EVENTS.WALLET_CREDITED, { userId, ...await getAvailableBalance(userId) });
       } else {
-        // Free call testing — get currency info only (no balance check)
         try {
           wallet = await getAvailableBalance(userId);
         } catch (e) {
@@ -76,13 +73,13 @@ export function requestHandler(io, socket) {
       // Generate Agora token for the client
       let agoraToken = null;
       try {
-    const result = generateAgoraToken(roomId, userId);
-agoraToken = result.token;
+        const result = generateAgoraToken(roomId);
+        agoraToken = result.token;
       } catch (e) {
         logger.warn({ e }, 'Agora token generation failed — client will retry');
       }
 
-      // Add to runtime
+      // Add to runtime — store sessionType in requestData for use on accept
       addRoom(roomId, {
         clientSocketId: socket.id,
         clientUserId:   userId,
@@ -92,28 +89,26 @@ agoraToken = result.token;
         requestData:    { language, sessionType, roomId, channelName: roomId },
       });
 
-      // Join the socket.io room
       socket.join(roomId);
 
-      // Tell the client: roomId, sessionId, channelName, token
       socket.emit('call-requested', {
         roomId,
         sessionId:   session.id,
         channelName: roomId,
         agoraToken,
+        sessionType,
       });
 
-      // Broadcast to interpreters and admins
+      // Broadcast to interpreters — use sessionType consistently (not type)
       const requestPayload = {
         roomId,
         channelName: roomId,
         language,
-        type: sessionType,
+        sessionType,
       };
       io.to('interpreters').emit('new-request', requestPayload);
       io.to('admins').emit('new-request', requestPayload);
 
-      // DEBUG: log how many interpreters received the event
       const interpreterSockets = await io.in('interpreters').fetchSockets();
       logger.info(
         { roomId, userId, language, sessionType, interpretersOnline: interpreterSockets.length },
