@@ -30,7 +30,17 @@ export function requestHandler(io, socket) {
       return;
     }
 
-    const { language, sessionType } = sanitized;
+    // ── FIX: destructure all fields sent by BookingPage.jsx ──────────────────
+    const {
+      language,
+      sessionType,
+      fromLang,
+      toLang,
+      duration,
+      category,
+      interpreterName,
+    } = sanitized;
+
     const roomId = uuidv4();
 
     try {
@@ -63,8 +73,8 @@ export function requestHandler(io, socket) {
       // Create DB session — use roomId as the Agora channel name
       const session = await createSession({
         clientId:     userId,
-        language,
-        purpose:      'general',
+        language:     fromLang ?? language,
+        purpose:      category ?? 'general',
         sessionType,
         currency:     wallet.currency ?? 'USD',
         agoraChannel: roomId,
@@ -79,14 +89,24 @@ export function requestHandler(io, socket) {
         logger.warn({ e }, 'Agora token generation failed — client will retry');
       }
 
-      // Add to runtime — store sessionType in requestData for use on accept
+      // ── FIX: store all session fields in requestData ──────────────────────
       addRoom(roomId, {
         clientSocketId: socket.id,
         clientUserId:   userId,
         sessionId:      session.id,
         reservedAmount: reserve,
         channelName:    roomId,
-        requestData:    { language, sessionType, roomId, channelName: roomId },
+        requestData: {
+          language,
+          fromLang:       fromLang ?? language,
+          toLang,
+          sessionType,
+          duration,
+          category,
+          interpreterName,
+          roomId,
+          channelName:    roomId,
+        },
       });
 
       socket.join(roomId);
@@ -99,19 +119,36 @@ export function requestHandler(io, socket) {
         sessionType,
       });
 
-      // Broadcast to interpreters — use sessionType consistently (not type)
+      // ── FIX: broadcast full session context to interpreters ───────────────
       const requestPayload = {
         roomId,
-        channelName: roomId,
+        channelName:    roomId,
         language,
+        fromLang:       fromLang ?? language,
+        toLang,
         sessionType,
+        duration,
+        category,
+        interpreterName,
       };
+
       io.to('interpreters').emit('new-request', requestPayload);
       io.to('admins').emit('new-request', requestPayload);
 
       const interpreterSockets = await io.in('interpreters').fetchSockets();
       logger.info(
-        { roomId, userId, language, sessionType, interpretersOnline: interpreterSockets.length },
+        {
+          roomId,
+          userId,
+          language,
+          fromLang,
+          toLang,
+          sessionType,
+          duration,
+          category,
+          interpreterName,
+          interpretersOnline: interpreterSockets.length,
+        },
         'Call requested — broadcast sent'
       );
     } catch (err) {

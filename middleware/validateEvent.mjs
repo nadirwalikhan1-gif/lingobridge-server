@@ -7,10 +7,15 @@ const SCHEMAS = {
     languages:    (v) => !Array.isArray(v) || v.length === 0 ? 'must be a non-empty array' : null,
     sessionTypes: (v) => !Array.isArray(v) || v.length === 0 ? 'must be a non-empty array' : null,
   },
-  'request-call': {
-    language:    (v) => typeof v !== 'string' || !v.trim() ? 'must be a non-empty string' : null,
-    sessionType: (v) => !['audio', 'video'].includes(v)    ? 'must be "audio" or "video"'  : null,
-  },
+ 'request-call': {
+  language:        (v) => typeof v !== 'string' || !v.trim() ? 'must be a non-empty string' : null,
+  sessionType:     (v) => !['audio', 'video'].includes(v)    ? 'must be "audio" or "video"'  : null,
+  fromLang:        (v) => v !== undefined && typeof v !== 'string' ? 'must be a string' : null,
+  toLang:          (v) => v !== undefined && typeof v !== 'string' ? 'must be a string' : null,
+  duration:        (v) => v !== undefined && typeof v !== 'string' ? 'must be a string' : null,
+  category:        (v) => v !== undefined && typeof v !== 'string' ? 'must be a string' : null,
+  interpreterName: (v) => v !== undefined && typeof v !== 'string' ? 'must be a string' : null,
+},
   'accept-call': {
     roomId: (v) => typeof v !== 'string' || !v.trim() ? 'must be a non-empty string' : null,
   },
