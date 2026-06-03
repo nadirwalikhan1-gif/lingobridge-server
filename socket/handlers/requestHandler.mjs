@@ -130,6 +130,7 @@ export function requestHandler(io, socket) {
         duration,
         category,
         interpreterName,
+        clientName: socket.userEmail?.split('@')[0] ?? 'Client',
       };
 
       io.to('interpreters').emit('new-request', requestPayload);
