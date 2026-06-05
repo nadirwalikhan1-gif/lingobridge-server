@@ -1,7 +1,7 @@
 import { logger } from '../config/logger.mjs';
 import { getStaleReservations, releaseReservation } from '../db/walletRepo.mjs';
 import { updateSessionStatus } from '../db/sessionRepo.mjs';
-import { RESERVATION_AMOUNT } from '../utils/constants.mjs';
+import { CLIENT_RATES } from '../utils/constants.mjs'; // FIX: vault-model rates
 
 // Run every 2 minutes
 const INTERVAL_MS = 2 * 60 * 1000;
@@ -23,25 +23,26 @@ export function stopReleaseReservationsJob() {
 
 async function runJob() {
   try {
-    // Find pending sessions older than 2 minutes (no interpreter accepted)
     const stale = await getStaleReservations(2);
-
     if (!stale.length) return;
 
     logger.info({ count: stale.length }, 'Releasing stale reservations');
 
     for (const session of stale) {
       try {
-        // Release reservation
-        const reservedAmount =
-          RESERVATION_AMOUNT['USD']?.['video'] ?? 18.00; // fallback
+        // FIX: vault-model — reserve one active minute as buffer, or $0 if no reservation
+        const ratePerMin = CLIENT_RATES.USD[session.session_type] ?? 1.49;
+        const reservedAmount = ratePerMin; // one minute buffer
 
-        await releaseReservation(session.client_id, reservedAmount);
+        if (reservedAmount > 0) {
+          await releaseReservation(session.client_id, reservedAmount, 'client'); // FIX: vault-aware
+        }
+
         await updateSessionStatus(session.id, 'cancelled', {
           ended_at: new Date().toISOString(),
         });
 
-        logger.info({ sessionId: session.id }, 'Stale reservation released');
+        logger.info({ sessionId: session.id, released: reservedAmount }, 'Stale reservation released');
       } catch (err) {
         logger.error({ err, sessionId: session.id }, 'Release failed');
       }

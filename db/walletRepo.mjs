@@ -2,82 +2,116 @@ import { supabaseAdmin } from '../config/supabase.mjs';
 import { NotFoundError } from '../utils/errors.mjs';
 
 /**
- * Get wallet by user ID
+ * Get wallet by user ID and vault type.
+ * Vault types: 'client' | 'interpreter' | 'platform'
  */
-export async function getWalletByUserId(userId) {
+export async function getWalletByUserId(userId, vaultType = 'client') {
   const { data, error } = await supabaseAdmin
     .from('wallets')
     .select('*')
     .eq('user_id', userId)
+    .eq('vault_type', vaultType)
     .single();
 
-  if (error || !data) throw new NotFoundError('Wallet');
+  if (error || !data) throw new NotFoundError(`Wallet (${vaultType})`);
   return data;
 }
 
 /**
- * Get available balance (balance - reserved_balance)
+ * Get available balance for a specific vault.
  */
-export async function getAvailableBalance(userId) {
-  const wallet = await getWalletByUserId(userId);
+export async function getAvailableBalance(userId, vaultType = 'client') {
+  const wallet = await getWalletByUserId(userId, vaultType);
   return {
     balance:          wallet.balance,
     reservedBalance:  wallet.reserved_balance,
     availableBalance: wallet.balance - wallet.reserved_balance,
     currency:         wallet.currency,
+    vaultType:        wallet.vault_type,
   };
 }
 
 /**
  * Credit wallet atomically via DB RPC.
  *
- * FIX: The previous implementation used:
- *   supabaseAdmin.rpc('increment', { x: amount }) as a column value inside .update()
- * This is INVALID in Supabase JS v2 — rpc() returns a query builder, not a scalar.
- * That call silently set balance = [object Object] or errored.
+ * NOTE: The Postgres function `credit_wallet_topup` must accept `p_vault_type`.
+ * If your SQL function doesn't have it yet, run this migration:
  *
- * Correct approach: delegate to a Postgres function that does:
- *   UPDATE wallets SET balance = balance + p_amount WHERE user_id = p_user_id
- * This is atomic and race-condition-safe.
- *
- * Required SQL (run once in Supabase SQL editor):
- * ─────────────────────────────────────────────
- * CREATE OR REPLACE FUNCTION credit_wallet_topup(p_user_id uuid, p_amount numeric)
- * RETURNS wallets LANGUAGE plpgsql AS $$
+ * ── SQL MIGRATION ─────────────────────────────────────────────
+ * CREATE OR REPLACE FUNCTION credit_wallet_topup(
+ *   p_user_id UUID,
+ *   p_amount  NUMERIC,
+ *   p_vault_type TEXT DEFAULT 'client'
+ * ) RETURNS wallets LANGUAGE plpgsql AS $$
  * DECLARE v_wallet wallets;
  * BEGIN
  *   UPDATE wallets
  *   SET balance    = balance + p_amount,
  *       updated_at = now()
- *   WHERE user_id = p_user_id
+ *   WHERE user_id = p_user_id AND vault_type = p_vault_type
  *   RETURNING * INTO v_wallet;
- *   IF NOT FOUND THEN RAISE EXCEPTION 'Wallet not found for user %', p_user_id; END IF;
+ *   IF NOT FOUND THEN
+ *     RAISE EXCEPTION 'Wallet not found for user % vault %', p_user_id, p_vault_type;
+ *   END IF;
  *   RETURN v_wallet;
  * END; $$;
- * ─────────────────────────────────────────────
- *
- * @returns {object} updated wallet row
+ * ──────────────────────────────────────────────────────────────
  */
-export async function creditWallet(userId, amount) {
+export async function creditWallet(userId, amount, vaultType = 'client') {
   const { data, error } = await supabaseAdmin
     .rpc('credit_wallet_topup', {
-      p_user_id: userId,
-      p_amount:  amount,
+      p_user_id:    userId,
+      p_amount:     amount,
+      p_vault_type: vaultType,
     });
 
   if (error) throw new Error(`Wallet credit failed: ${error.message}`);
-  if (!data) throw new NotFoundError('Wallet');
+  if (!data) throw new NotFoundError(`Wallet (${vaultType})`);
   return data;
 }
 
 /**
- * Reserve funds atomically via DB function
+ * Reserve funds atomically via DB function.
+ *
+ * NOTE: Postgres function `reserve_wallet_funds` must accept `p_vault_type`.
+ * ── SQL MIGRATION ─────────────────────────────────────────────
+ * CREATE OR REPLACE FUNCTION reserve_wallet_funds(
+ *   p_user_id UUID,
+ *   p_amount  NUMERIC,
+ *   p_vault_type TEXT DEFAULT 'client'
+ * ) RETURNS JSONB LANGUAGE plpgsql AS $$
+ * DECLARE
+ *   v_wallet wallets;
+ *   v_available NUMERIC;
+ * BEGIN
+ *   SELECT * INTO v_wallet
+ *   FROM wallets
+ *   WHERE user_id = p_user_id AND vault_type = p_vault_type
+ *   FOR UPDATE;
+ *
+ *   IF NOT FOUND THEN
+ *     RETURN jsonb_build_object('success', false, 'reason', 'wallet_not_found');
+ *   END IF;
+ *
+ *   v_available := v_wallet.balance - v_wallet.reserved_balance;
+ *   IF v_available < p_amount THEN
+ *     RETURN jsonb_build_object('success', false, 'reason', 'insufficient_funds');
+ *   END IF;
+ *
+ *   UPDATE wallets
+ *   SET reserved_balance = reserved_balance + p_amount
+ *   WHERE user_id = p_user_id AND vault_type = p_vault_type;
+ *
+ *   RETURN jsonb_build_object('success', true);
+ * END; $$;
+ * ──────────────────────────────────────────────────────────────
  */
-export async function reserveFunds(userId, amount) {
+export async function reserveFunds(userId, amount, vaultType = 'client') {
   const { data, error } = await supabaseAdmin
     .rpc('reserve_wallet_funds', {
-      p_user_id: userId,
-      p_amount:  amount,
+      p_user_id:    userId,
+      p_amount:     amount,
+      p_vault_type: vaultType,
     });
 
   if (error) throw new Error(`Reserve RPC failed: ${error.message}`);
@@ -85,28 +119,77 @@ export async function reserveFunds(userId, amount) {
 }
 
 /**
- * Release reservation via DB function
+ * Release reservation via DB function.
+ *
+ * NOTE: Postgres function `release_wallet_reservation` must accept `p_vault_type`.
+ * ── SQL MIGRATION ─────────────────────────────────────────────
+ * CREATE OR REPLACE FUNCTION release_wallet_reservation(
+ *   p_user_id UUID,
+ *   p_amount  NUMERIC,
+ *   p_vault_type TEXT DEFAULT 'client'
+ * ) RETURNS void LANGUAGE plpgsql AS $$
+ * BEGIN
+ *   UPDATE wallets
+ *   SET reserved_balance = GREATEST(0, reserved_balance - p_amount)
+ *   WHERE user_id = p_user_id AND vault_type = p_vault_type;
+ * END; $$;
+ * ──────────────────────────────────────────────────────────────
  */
-export async function releaseReservation(userId, amount) {
+export async function releaseReservation(userId, amount, vaultType = 'client') {
   const { error } = await supabaseAdmin
     .rpc('release_wallet_reservation', {
-      p_user_id: userId,
-      p_amount:  amount,
+      p_user_id:    userId,
+      p_amount:     amount,
+      p_vault_type: vaultType,
     });
 
   if (error) throw new Error(`Release RPC failed: ${error.message}`);
 }
 
 /**
- * Atomic deduction via DB function (with SELECT FOR UPDATE)
+ * Atomic deduction via DB function (with SELECT FOR UPDATE).
+ *
+ * NOTE: Postgres function `deduct_wallet_for_session` must accept `p_vault_type`.
+ * ── SQL MIGRATION ─────────────────────────────────────────────
+ * CREATE OR REPLACE FUNCTION deduct_wallet_for_session(
+ *   p_user_id     UUID,
+ *   p_session_id  UUID,
+ *   p_amount      NUMERIC,
+ *   p_description TEXT,
+ *   p_vault_type  TEXT DEFAULT 'client'
+ * ) RETURNS JSONB LANGUAGE plpgsql AS $$
+ * DECLARE
+ *   v_wallet wallets;
+ * BEGIN
+ *   SELECT * INTO v_wallet
+ *   FROM wallets
+ *   WHERE user_id = p_user_id AND vault_type = p_vault_type
+ *   FOR UPDATE;
+ *
+ *   IF NOT FOUND THEN
+ *     RETURN jsonb_build_object('success', false, 'reason', 'wallet_not_found');
+ *   END IF;
+ *
+ *   IF v_wallet.balance < p_amount THEN
+ *     RETURN jsonb_build_object('success', false, 'reason', 'insufficient_funds');
+ *   END IF;
+ *
+ *   UPDATE wallets
+ *   SET balance = balance - p_amount
+ *   WHERE user_id = p_user_id AND vault_type = p_vault_type;
+ *
+ *   RETURN jsonb_build_object('success', true);
+ * END; $$;
+ * ──────────────────────────────────────────────────────────────
  */
-export async function deductWallet(userId, sessionId, amount, description) {
+export async function deductWallet(userId, sessionId, amount, description, vaultType = 'client') {
   const { data, error } = await supabaseAdmin
     .rpc('deduct_wallet_for_session', {
       p_user_id:     userId,
       p_session_id:  sessionId,
       p_amount:      amount,
       p_description: description,
+      p_vault_type:  vaultType,
     });
 
   if (error) throw new Error(`Deduction RPC failed: ${error.message}`);

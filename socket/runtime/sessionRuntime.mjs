@@ -2,11 +2,10 @@
  * sessionRuntime.mjs
  * Tracks live session state in memory
  * Each entry: roomId → { clientSocketId, clientUserId, interpreterSocketId,
- *                        sessionId, reservedAmount, requestData }
+ *                        sessionId, reservedAmount, requestData, participants, onHold }
  *
  * NOTE: This is intentionally in-memory.
  * Under Redis + multi-instance: stale session cron (60s) catches orphaned sessions.
- * For true multi-instance runtime state, migrate this to Redis hashes.
  */
 
 // Map<roomId, RoomState>
@@ -16,7 +15,11 @@ const rooms = new Map();
 const socketToRooms = new Map();
 
 export function addRoom(roomId, state) {
-  rooms.set(roomId, state);
+  rooms.set(roomId, {
+    ...state,
+    participants: [], // FIX: 3-party participant tracking
+    onHold: false,  // FIX: hold state mirror
+  });
   _trackSocket(state.clientSocketId, roomId);
 }
 
@@ -37,7 +40,6 @@ export function deleteRoom(roomId) {
   const room = rooms.get(roomId);
   if (!room) return;
 
-  // Clean up socket tracking
   _untrackSocket(room.clientSocketId, roomId);
   if (room.interpreterSocketId) _untrackSocket(room.interpreterSocketId, roomId);
 
@@ -56,6 +58,29 @@ export function getPendingRooms() {
 
 export function getRoomCount() {
   return rooms.size;
+}
+
+// FIX: 3-party participant management
+export function addParticipant(roomId, participant) {
+  const room = rooms.get(roomId);
+  if (!room) return;
+  if (!room.participants.find(p => p.name === participant.name && p.role === participant.role)) {
+    room.participants.push(participant);
+  }
+}
+
+export function getParticipants(roomId) {
+  return rooms.get(roomId)?.participants || [];
+}
+
+// FIX: hold state management
+export function setRoomHold(roomId, onHold) {
+  const room = rooms.get(roomId);
+  if (room) room.onHold = onHold;
+}
+
+export function isRoomOnHold(roomId) {
+  return rooms.get(roomId)?.onHold || false;
 }
 
 function _trackSocket(socketId, roomId) {

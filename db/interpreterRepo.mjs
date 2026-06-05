@@ -62,7 +62,6 @@ export async function setInterpreterAvailability(userId, isAvailable) {
  * Update interpreter rating (after session rating submitted)
  */
 export async function updateInterpreterRating(userId) {
-  // Recalculate average from all ratings
   const { data: sessions } = await supabaseAdmin
     .from('session_ratings')
     .select('rating, sessions!inner(interpreter_id)')
@@ -80,14 +79,35 @@ export async function updateInterpreterRating(userId) {
 
 /**
  * Get interpreter payout history
+ * FIX: vault-model — now reads from payout_requests table
  */
 export async function getPayoutsByInterpreter(interpreterId) {
   const { data, error } = await supabaseAdmin
-    .from('interpreter_payouts')
+    .from('payout_requests') // FIX: vault-model table name
     .select('*')
     .eq('interpreter_id', interpreterId)
-    .order('created_at', { ascending: false });
+    .order('requested_at', { ascending: false }); // FIX: column name
 
   if (error) throw new Error(`Payouts fetch failed: ${error.message}`);
   return data || [];
+}
+
+/**
+ * FIX: vault-model — get interpreter vault balance for dashboard
+ */
+export async function getInterpreterBalance(userId) {
+  const { data, error } = await supabaseAdmin
+    .from('wallets')
+    .select('balance, reserved_balance, currency')
+    .eq('user_id', userId)
+    .eq('vault_type', 'interpreter')
+    .single();
+
+  if (error || !data) throw new NotFoundError('Interpreter wallet');
+  return {
+    balance: data.balance,
+    reservedBalance: data.reserved_balance,
+    availableBalance: data.balance - data.reserved_balance,
+    currency: data.currency,
+  };
 }

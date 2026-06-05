@@ -2,7 +2,8 @@ import { validateEvent } from '../../middleware/validateEvent.mjs';
 import { rateLimitSocket } from '../../middleware/rateLimiter.mjs';
 import { getRoom, updateRoom, deleteRoom } from '../runtime/sessionRuntime.mjs';
 import { activateSession, updateSessionStatus } from '../../db/sessionRepo.mjs';
-import { releaseReservation } from '../../db/walletRepo.mjs';
+import { releaseReservation, getWalletByUserId } from '../../db/walletRepo.mjs';
+import { supabaseAdmin } from '../../config/supabase.mjs';
 import { generateAgoraToken } from '../../services/agoraService.mjs';
 import { eventBus, EVENTS } from '../../utils/eventBus.mjs';
 import { logger } from '../../config/logger.mjs';
@@ -37,19 +38,33 @@ export function acceptHandler(io, socket) {
     }
 
     try {
+      // FIX: vault-model — ensure interpreter has an earnings vault before accepting
+      try {
+        await getWalletByUserId(interpreterId, 'interpreter');
+      } catch (e) {
+        await supabaseAdmin
+          .from('wallets')
+          .insert({
+            user_id: interpreterId,
+            vault_type: 'interpreter',
+            balance: 0,
+            currency: 'USD',
+            reserved_balance: 0,
+          });
+        logger.info({ interpreterId }, 'Created interpreter vault on accept');
+      }
+
       await activateSession(room.sessionId, interpreterId);
       updateRoom(roomId, { interpreterSocketId: socket.id, interpreterUserId: interpreterId });
       socket.join(roomId);
 
       const channelName = room.channelName ?? roomId;
-      // sessionType is always sourced from requestData — never falls back to a wrong default
       const sessionType = room.requestData?.sessionType;
       if (!sessionType) {
         logger.warn({ roomId }, 'sessionType missing from requestData — defaulting to audio');
       }
       const resolvedSessionType = sessionType ?? 'audio';
 
-      // Generate fresh tokens for both parties on accept
       let clientToken = null;
       let interpreterToken = null;
       try {
@@ -63,7 +78,11 @@ export function acceptHandler(io, socket) {
         logger.warn({ e }, 'Agora token generation failed on accept — parties will retry');
       }
 
-      // Notify client
+      // FIX: resolve clientName from room data (was undefined variable)
+      const clientName = room.requestData?.clientName 
+        || room.clientUserId?.split('@')[0] 
+        || 'Client';
+
       io.to(room.clientSocketId).emit('call-accepted', {
         roomId,
         interpreterId,
@@ -73,7 +92,6 @@ export function acceptHandler(io, socket) {
         sessionType: resolvedSessionType,
       });
 
-      // Notify accepting interpreter
       socket.emit('call-accepted', {
         roomId,
         clientId:    room.clientUserId,
@@ -81,12 +99,11 @@ export function acceptHandler(io, socket) {
         channelName,
         agoraToken:  interpreterToken,
         sessionType: resolvedSessionType,
+        clientName,  // FIX: was `clientName,clientName` — duplicate undefined
       });
 
-      // Remove card from all other interpreters' dashboards
       socket.to('interpreters').emit('request-cancelled', { roomId });
 
-      // Notify admins
       io.to('admins').emit('call-accepted', {
         roomId,
         interpreterId,
@@ -103,7 +120,6 @@ export function acceptHandler(io, socket) {
     }
   });
 
-  // ── CLIENT CANCELS REQUEST ────────────────────────────────────────────────
   socket.on('reject-call', async (data) => {
     const { roomId } = data || {};
     if (!roomId) return;
@@ -117,7 +133,7 @@ export function acceptHandler(io, socket) {
     }
 
     try {
-      await releaseReservation(room.clientUserId, room.reservedAmount);
+      await releaseReservation(room.clientUserId, room.reservedAmount, 'client');
       eventBus.emit(EVENTS.WALLET_CREDITED, { userId: room.clientUserId });
       await updateSessionStatus(room.sessionId, 'cancelled', { ended_at: new Date().toISOString() });
 

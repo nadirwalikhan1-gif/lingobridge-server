@@ -4,11 +4,14 @@ import { requestHandler as registerHandler }  from './handlers/registerHandler.m
 import { requestHandler }   from './handlers/requestHandler.mjs';
 import { acceptHandler }    from './handlers/acceptHandler.mjs';
 import { endCallHandler }   from './handlers/endCallHandler.mjs';
+import { callInfoHandler } from './handlers/callInfoHandler.mjs';
+import { registerSessionHandlers } from './handlers/sessionHandlers.mjs'; // NEW
 import { logger }           from '../config/logger.mjs';
 import { getRedisClient, isRedisAvailable } from '../config/redis.mjs';
 import { eventBus, EVENTS } from '../utils/eventBus.mjs';
 import { SOCKET_EVENTS }    from '../utils/constants.mjs';
 import { getPendingRooms }  from './runtime/sessionRuntime.mjs';
+import { billingTick, holdBillingTick } from '../services/billingService.mjs'; // NEW
 
 export async function createSocketServer(httpServer) {
   const isDev = process.env.NODE_ENV !== 'production';
@@ -61,13 +64,11 @@ export async function createSocketServer(httpServer) {
     logger.info({ socketId: socket.id, userId: socket.userId, role }, 'Socket connected');
 
     // FIX: Join role-based rooms immediately on connect (before any 'register' event)
-    // This ensures interpreters/admins receive broadcasts even if they never emit 'register'
     if (role === 'interpreter') {
       socket.join('interpreters');
       socket.interpreterRole = true;
       logger.info({ userId: socket.userId }, 'Interpreter auto-joined interpreters room');
 
-      // Replay any pending requests so dashboard hydrates immediately
       const pending = getPendingRooms();
       if (pending.length > 0) {
         socket.emit('pending-requests', pending);
@@ -79,7 +80,6 @@ export async function createSocketServer(httpServer) {
       socket.join('admins');
       logger.info({ userId: socket.userId }, 'Admin auto-joined admins room');
 
-      // Replay pending requests to admin dashboard too
       const pending = getPendingRooms();
       if (pending.length > 0) {
         socket.emit('pending-requests', pending);
@@ -94,6 +94,8 @@ export async function createSocketServer(httpServer) {
     requestHandler(io, socket);
     acceptHandler(io, socket);
     endCallHandler(io, socket);
+    callInfoHandler(io, socket);
+    registerSessionHandlers(io, socket); // NEW
   });
 
   // ── Real-time wallet balance push ─────────────────────────
@@ -112,6 +114,11 @@ export async function createSocketServer(httpServer) {
     }
     logger.info({ userId, balance, pushed }, 'Wallet balance pushed to connected socket(s)');
   });
+
+  // NEW: Start vault-model billing loops
+  setInterval(billingTick, 60_000);
+  setInterval(holdBillingTick, 60_000);
+  logger.info('Billing loops started: active (60s) + hold (60s)');
 
   return io;
 }

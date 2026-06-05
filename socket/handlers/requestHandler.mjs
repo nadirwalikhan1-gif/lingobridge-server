@@ -5,7 +5,7 @@ import { addRoom, getRoom } from '../runtime/sessionRuntime.mjs';
 import { createSession } from '../../db/sessionRepo.mjs';
 import { reserveFunds, getAvailableBalance } from '../../db/walletRepo.mjs';
 import { generateAgoraToken } from '../../services/agoraService.mjs';
-import { RESERVATION_AMOUNT } from '../../utils/constants.mjs';
+import { CLIENT_RATES } from '../../utils/constants.mjs'; // FIX: vault-model client rates
 import { eventBus, EVENTS } from '../../utils/eventBus.mjs';
 import { logger } from '../../config/logger.mjs';
 
@@ -14,10 +14,8 @@ const FREE_CALL_TESTING = true;
 
 export function requestHandler(io, socket) {
   socket.on('request-call', async (data) => {
-    // Rate limit
     if (!rateLimitSocket(socket, 'request-call', { max: 3, windowMs: 10_000 })) return;
 
-    // Validate payload
     const { valid, errors, sanitized } = validateEvent('request-call', data);
     if (!valid) {
       socket.emit('error', { code: 'VALIDATION_ERROR', errors });
@@ -30,7 +28,6 @@ export function requestHandler(io, socket) {
       return;
     }
 
-    // ── FIX: destructure all fields sent by BookingPage.jsx ──────────────────
     const {
       language,
       sessionType,
@@ -48,39 +45,44 @@ export function requestHandler(io, socket) {
       let reserve = 0;
 
       if (!FREE_CALL_TESTING) {
-        wallet = await getAvailableBalance(userId);
-        reserve = RESERVATION_AMOUNT[wallet.currency]?.[sessionType] ?? 18.00;
+        wallet = await getAvailableBalance(userId, 'client'); // FIX: vault-aware
+        // FIX: vault-model — reserve one active minute as buffer
+        const ratePerMin = CLIENT_RATES.USD[sessionType] ?? 1.49;
+        reserve = ratePerMin;
 
         if (wallet.availableBalance < reserve) {
           socket.emit('error', {
             code: 'INSUFFICIENT_FUNDS',
-            message: `Need ${reserve} ${wallet.currency} to start a ${sessionType} call.`,
+            message: `Need $${reserve.toFixed(2)} to start a ${sessionType} call.`,
           });
           return;
         }
 
-        await reserveFunds(userId, reserve);
-        eventBus.emit(EVENTS.WALLET_CREDITED, { userId, ...await getAvailableBalance(userId) });
+        await reserveFunds(userId, reserve, 'client'); // FIX: vault-aware
+        eventBus.emit(EVENTS.WALLET_CREDITED, { userId, ...await getAvailableBalance(userId, 'client') });
       } else {
         try {
-          wallet = await getAvailableBalance(userId);
+          wallet = await getAvailableBalance(userId, 'client');
         } catch (e) {
           // ignore — wallet may not exist in test
         }
         logger.info({ userId }, 'FREE_CALL_TESTING: skipping wallet check');
       }
 
-      // Create DB session — use roomId as the Agora channel name
+      // FIX: vault-model — pass bookedDuration to session creation
+      const bookedDuration = parseInt(duration) * 60 || 1800;
+
       const session = await createSession({
-        clientId:     userId,
-        language:     fromLang ?? language,
-        purpose:      category ?? 'general',
+        clientId:       userId,
+        language:       fromLang ?? language,
+        purpose:        category ?? 'general',
         sessionType,
-        currency:     wallet.currency ?? 'USD',
-        agoraChannel: roomId,
+        currency:       wallet.currency ?? 'USD',
+        agoraChannel:   roomId,
+        bookedDuration, // FIX: vault-model
+        duration,       // FIX: pass raw duration string too
       });
 
-      // Generate Agora token for the client
       let agoraToken = null;
       try {
         const result = generateAgoraToken(roomId);
@@ -89,7 +91,6 @@ export function requestHandler(io, socket) {
         logger.warn({ e }, 'Agora token generation failed — client will retry');
       }
 
-      // ── FIX: store all session fields in requestData ──────────────────────
       addRoom(roomId, {
         clientSocketId: socket.id,
         clientUserId:   userId,
@@ -119,7 +120,6 @@ export function requestHandler(io, socket) {
         sessionType,
       });
 
-      // ── FIX: broadcast full session context to interpreters ───────────────
       const requestPayload = {
         roomId,
         channelName:    roomId,

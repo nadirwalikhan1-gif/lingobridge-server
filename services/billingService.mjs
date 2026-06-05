@@ -1,110 +1,240 @@
 import { logger } from '../config/logger.mjs';
-import { supabaseAdmin } from '../config/supabase.mjs';
-import { getWalletByUserId } from '../db/walletRepo.mjs';
-import { getSessionById, updateLastBilledAt } from '../db/sessionRepo.mjs';
-import { endSession } from './sessionService.mjs';
-import { BILLING_INTERVAL_MS } from '../utils/constants.mjs';
+import db from '../db/index.mjs';
+import {
+  CLIENT_RATES,
+  INTERPRETER_RATES,
+  INTERPRETER_HOLD_RATE,
+  HOLD_TIERS,
+  PLATFORM_VAULT_ID,
+  BILLING_INTERVAL_MS,
+} from '../utils/constants.mjs';
 import { eventBus } from '../utils/eventBus.mjs';
-// FIX: import calculateCost from utils instead of defining here (breaks circular dependency)
-import { calculateCost } from '../utils/billing.mjs';
 
-// Map<sessionId, intervalId>
-const billingIntervals = new Map();
+// Legacy tracking (callers still invoke startBilling/stopBilling)
+const activeSessions = new Map();
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /**
- * Start billing loop for a session
+ * Calculate client charge for one 60s tick of hold time.
+ * Uses flat-rate tiers per session type.
  */
-export function startBilling(sessionId, io) {
-  if (billingIntervals.has(sessionId)) {
-    logger.warn({ sessionId }, 'Billing already running');
-    return;
+function holdClientCharge(priorHoldSeconds, tickSeconds, sessionType) {
+  const tiers = HOLD_TIERS[sessionType];
+  let charge = 0;
+  let cursor = priorHoldSeconds;
+  let covered = 0;
+
+  for (const tier of tiers) {
+    const tierEndSeconds = tier.upTo * 60;
+    if (cursor >= tierEndSeconds) continue;
+
+    const availableInTier = tierEndSeconds - cursor;
+    const secondsInTier = Math.min(tickSeconds - covered, availableInTier);
+    if (secondsInTier <= 0) break;
+
+    charge += (secondsInTier / 60) * tier.rate;
+    covered += secondsInTier;
+    cursor += secondsInTier;
+
+    if (covered >= tickSeconds) break;
   }
 
-  logger.info({ sessionId }, 'Billing started');
-
-  const interval = setInterval(async () => {
-    try {
-      await billingTick(sessionId, io);
-    } catch (err) {
-      logger.error({ err, sessionId }, 'Billing tick error');
-      stopBilling(sessionId);
-    }
-  }, BILLING_INTERVAL_MS);
-
-  billingIntervals.set(sessionId, interval);
+  return parseFloat(charge.toFixed(4));
 }
 
 /**
- * Single billing tick — checks balance, auto-ends if exhausted
+ * Atomic 3-vault transfer. Throws 'INSUFFICIENT_BALANCE' if client can't pay.
  */
-async function billingTick(sessionId, io) {
-  const session = await getSessionById(sessionId).catch(() => null);
+async function transferFunds({ clientId, interpreterId, clientCharge, interpreterEarning }) {
+  const platformEarning = parseFloat((clientCharge - interpreterEarning).toFixed(4));
 
-  if (!session || session.status !== 'active') {
-    stopBilling(sessionId);
-    return;
+  await db.query('BEGIN');
+  try {
+    const clientRes = await db.query(
+      `UPDATE wallets SET balance = balance - $1
+       WHERE user_id = $2 AND vault_type = 'client' AND balance >= $1
+       RETURNING *`,
+      [clientCharge, clientId]
+    );
+
+    if (clientRes.rowCount === 0) {
+      throw new Error('INSUFFICIENT_BALANCE');
+    }
+
+    await db.query(
+      `UPDATE wallets SET balance = balance + $1
+       WHERE user_id = $2 AND vault_type = 'interpreter'`,
+      [interpreterEarning, interpreterId]
+    );
+
+    await db.query(
+      `UPDATE wallets SET balance = balance + $1
+       WHERE user_id = $2 AND vault_type = 'platform'`,
+      [platformEarning, PLATFORM_VAULT_ID]
+    );
+
+    await db.query('COMMIT');
+  } catch (err) {
+    await db.query('ROLLBACK');
+    throw err;
   }
+}
 
-  await updateLastBilledAt(sessionId).catch(() => {});
+// ─── Active billing tick (called every 60s by server entry point) ─────────────
 
-  const wallet = await getWalletByUserId(session.client_id).catch(() => null);
-  if (!wallet) { stopBilling(sessionId); return; }
-
-  const { cost, rawSeconds } = calculateCost(
-    session.started_at,
-    session.currency || 'USD',
-    session.session_type
+export async function billingTick() {
+  const { rows: sessions } = await db.query(
+    `SELECT id, client_id, interpreter_id, session_type, agora_channel
+     FROM sessions
+     WHERE status = 'active' AND on_hold = false`
   );
 
-  const available = wallet.balance - wallet.reserved_balance;
+  for (const session of sessions) {
+    try {
+      const clientRate = CLIENT_RATES.USD[session.session_type];
+      const interpreterRate = INTERPRETER_RATES.USD[session.session_type];
 
-  logger.debug({ sessionId, cost, available, rawSeconds }, 'Billing tick');
-
-  await supabaseAdmin
-    .from('sessions')
-    .update({ raw_duration_sec: rawSeconds })
-    .eq('id', sessionId)
-    .catch(() => {});
-
-  if (cost >= available) {
-    logger.warn({ sessionId, cost, available }, 'Balance exhausted — ending call');
-    stopBilling(sessionId);
-
-    if (io && session.agora_channel) {
-      io.to(session.agora_channel).emit('call-ended', {
-        reason:  'balance_exhausted',
-        message: 'Call ended — insufficient balance',
+      await transferFunds({
+        clientId: session.client_id,
+        interpreterId: session.interpreter_id,
+        clientCharge: parseFloat(clientRate.toFixed(4)),
+        interpreterEarning: parseFloat(interpreterRate.toFixed(4)),
       });
+
+      // Ledger audit trail
+      await db.query(
+        `INSERT INTO transactions (user_id, type, amount, reference_id, created_at)
+         VALUES ($1,'charge',$2,$3,NOW()),
+                ($4,'earning',$5,$3,NOW()),
+                ($6,'platform_revenue',$7,$3,NOW())`,
+        [
+          session.client_id, clientRate,
+          session.id,
+          session.interpreter_id, interpreterRate,
+          PLATFORM_VAULT_ID, parseFloat((clientRate - interpreterRate).toFixed(4)),
+        ]
+      );
+
+      logger.debug({ sessionId: session.id }, 'Active billing tick processed');
+    } catch (err) {
+      if (err.message === 'INSUFFICIENT_BALANCE') {
+        logger.warn({ sessionId: session.id }, 'Balance exhausted — ending session');
+
+        await db.query(
+          `UPDATE sessions
+           SET status = 'completed', ended_at = NOW(), end_reason = 'balance_exhausted'
+           WHERE id = $1`,
+          [session.id]
+        );
+
+        eventBus.emit('session.balance_exhausted', {
+          sessionId: session.id,
+          channelId: session.agora_channel,
+        });
+        continue;
+      }
+
+      logger.error({ err, sessionId: session.id }, 'Active billing tick failed');
     }
-
-    eventBus.emit('session.balance_exhausted', { sessionId });
-    await endSession(sessionId, 'balance_exhausted');
   }
 }
 
-/**
- * Stop billing for a session
- */
+// ─── Hold billing tick (called every 60s by server entry point) ───────────────
+
+export async function holdBillingTick() {
+  const { rows: heldSessions } = await db.query(
+    `SELECT id, client_id, interpreter_id, session_type,
+            total_hold_seconds, hold_started_at
+     FROM sessions
+     WHERE status = 'active' AND on_hold = true AND hold_started_at IS NOT NULL`
+  );
+
+  for (const session of heldSessions) {
+    try {
+      const priorHoldSeconds = session.total_hold_seconds ?? 0;
+      const tickSeconds = 60;
+
+      const clientCharge = holdClientCharge(priorHoldSeconds, tickSeconds, session.session_type);
+      const interpreterEarning = parseFloat((INTERPRETER_HOLD_RATE * (tickSeconds / 60)).toFixed(4));
+
+      if (clientCharge > 0 || interpreterEarning > 0) {
+        const platformDelta = parseFloat((clientCharge - interpreterEarning).toFixed(4));
+
+        await db.query('BEGIN');
+        try {
+          if (clientCharge > 0) {
+            await db.query(
+              `UPDATE wallets SET balance = balance - $1
+               WHERE user_id = $2 AND vault_type = 'client'`,
+              [clientCharge, session.client_id]
+            );
+          }
+
+          await db.query(
+            `UPDATE wallets SET balance = balance + $1
+             WHERE user_id = $2 AND vault_type = 'interpreter'`,
+            [interpreterEarning, session.interpreter_id]
+          );
+
+          await db.query(
+            `UPDATE wallets SET balance = balance + $1
+             WHERE user_id = $2 AND vault_type = 'platform'`,
+            [platformDelta, PLATFORM_VAULT_ID]
+          );
+
+          await db.query(
+            `UPDATE sessions SET total_hold_seconds = total_hold_seconds + $1
+             WHERE id = $2`,
+            [tickSeconds, session.id]
+          );
+
+          await db.query('COMMIT');
+        } catch (err) {
+          await db.query('ROLLBACK');
+          throw err;
+        }
+      }
+
+      logger.debug({ sessionId: session.id }, 'Hold billing tick processed');
+    } catch (err) {
+      logger.error({ err, sessionId: session.id }, 'Hold billing tick failed');
+    }
+  }
+}
+
+// ─── End session — closes record (per-minute billing already handled) ─────────
+
+export async function endSession(sessionId) {
+  const { rows } = await db.query(
+    `UPDATE sessions SET status = 'completed', ended_at = NOW()
+     WHERE id = $1 AND status = 'active'
+     RETURNING *`,
+    [sessionId]
+  );
+
+  if (!rows.length) return null;
+  logger.info({ sessionId }, 'Session ended');
+  return rows[0];
+}
+
+// ─── Legacy compatibility wrappers ───────────────────────────────────────────
+
+export function startBilling(sessionId, io) {
+  activeSessions.set(sessionId, { io });
+  logger.info({ sessionId }, 'Billing tracked (global tick handles actual billing)');
+}
+
 export function stopBilling(sessionId) {
-  const interval = billingIntervals.get(sessionId);
-  if (interval) {
-    clearInterval(interval);
-    billingIntervals.delete(sessionId);
-    logger.info({ sessionId }, 'Billing stopped');
-  }
+  activeSessions.delete(sessionId);
+  logger.info({ sessionId }, 'Billing untracked');
 }
 
-/**
- * Stop all billing loops (on shutdown)
- */
 export function stopAllBilling() {
-  billingIntervals.forEach((_, sessionId) => stopBilling(sessionId));
-  logger.info('All billing engines stopped');
+  activeSessions.clear();
+  logger.info('All billing tracking cleared');
 }
 
-/**
- * How many sessions are currently being billed
- */
 export function getActiveBillingCount() {
-  return billingIntervals.size;
+  return activeSessions.size;
 }

@@ -1,11 +1,11 @@
 import { verifySupabaseToken } from '../config/supabase.mjs';
+import { getWalletByUserId } from '../db/walletRepo.mjs';
+import { supabaseAdmin } from '../config/supabase.mjs';
 import { logger } from '../config/logger.mjs';
 
 /**
  * Socket.IO middleware — verifies Supabase JWT on every new connection.
- * Attaches userId, user, and role to the socket object.
- *
- * Usage: io.use(authSocketMiddleware)
+ * Attaches userId, user, role, and ensures vault wallet exists.
  */
 export async function authSocketMiddleware(socket, next) {
   try {
@@ -28,14 +28,29 @@ export async function authSocketMiddleware(socket, next) {
     socket.userId = user.id;
     socket.user   = user;
 
-    // FIX: Extract role from Supabase JWT metadata so index.mjs can
-    // auto-join interpreters/admins rooms without waiting for 'register' event.
-    // Supabase stores custom claims under user_metadata or app_metadata.
     socket.role =
-      user.app_metadata?.role ||   // set via Supabase admin API (most reliable)
-      user.user_metadata?.role ||  // set during signup
-      socket.handshake.auth?.role || // fallback: client passes role in handshake
-      'client';                    // default
+      user.app_metadata?.role ||
+      user.user_metadata?.role ||
+      socket.handshake.auth?.role ||
+      'client';
+
+    // FIX: vault-model — ensure user has appropriate vault wallet on connect
+    const vaultType = socket.role === 'interpreter' ? 'interpreter' : 'client';
+    try {
+      await getWalletByUserId(user.id, vaultType);
+    } catch (e) {
+      // Wallet doesn't exist — create it
+      await supabaseAdmin
+        .from('wallets')
+        .insert({
+          user_id: user.id,
+          vault_type: vaultType,
+          balance: 0,
+          currency: 'USD',
+          reserved_balance: 0,
+        });
+      logger.info({ userId: user.id, vaultType }, 'Created vault wallet on socket auth');
+    }
 
     logger.info({ socketId: socket.id, userId: user.id, role: socket.role }, 'Socket authenticated');
 

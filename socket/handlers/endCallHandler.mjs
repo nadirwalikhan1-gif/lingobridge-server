@@ -1,5 +1,5 @@
 import { logger } from '../../config/logger.mjs';
-import { endSession } from '../../services/sessionService.mjs';
+import { endSession } from '../../services/billingService.mjs';        // FIX: vault-model endSession
 import { stopBilling } from '../../services/billingService.mjs';
 import { setInterpreterAvailability } from '../../db/interpreterRepo.mjs';
 import { getRoom, deleteRoom, getRoomsForSocket } from '../runtime/sessionRuntime.mjs';
@@ -22,12 +22,10 @@ export function endCallHandler(io, socket) {
   socket.on('disconnect', async (reason) => {
     logger.info({ socketId: socket.id, userId: socket.userId, reason }, 'Socket disconnected');
 
-    // Mark interpreter unavailable
     if (socket.interpreterRole) {
       await setInterpreterAvailability(socket.userId, false).catch(() => {});
     }
 
-    // End all rooms this socket was part of
     const roomIds = getRoomsForSocket(socket.id);
     for (const roomId of roomIds) {
       await _endRoom(io, socket, roomId, 'disconnect').catch((err) =>
@@ -46,7 +44,7 @@ async function _endRoom(io, socket, roomId, reason) {
 
   deleteRoom(roomId);
 
-  // Stop billing engine
+  // Clear billing tracker (global intervals handle actual per-minute billing)
   if (room.sessionId) {
     stopBilling(room.sessionId);
   }
@@ -54,9 +52,9 @@ async function _endRoom(io, socket, roomId, reason) {
   // Notify both parties
   io.to(roomId).emit('call-ended', { reason });
 
-  // End session in DB + deduct wallet
+  // End session in DB — vault-model billing already processed per-minute
   if (room.sessionId) {
-    await endSession(room.sessionId, reason).catch((err) =>
+    await endSession(room.sessionId).catch((err) =>
       logger.error({ err, roomId, sessionId: room.sessionId }, 'endSession failed')
     );
   }

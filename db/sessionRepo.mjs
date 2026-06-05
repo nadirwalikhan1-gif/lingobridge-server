@@ -8,13 +8,14 @@ export async function createSession(data) {
   const { data: session, error } = await supabaseAdmin
     .from('sessions')
     .insert({
-      client_id:     data.clientId,
-      language:      data.language,
-      purpose:       data.purpose,
-      session_type:  data.sessionType,
-      currency:      data.currency,
-      agora_channel: data.agoraChannel,
-      status:        'pending',
+      client_id:      data.clientId,
+      language:       data.language,
+      purpose:        data.purpose,
+      session_type:   data.sessionType,
+      currency:       data.currency,
+      agora_channel:  data.agoraChannel,
+      booked_duration: data.bookedDuration || (parseInt(data.duration) * 60) || 1800, // FIX: vault-model
+      status:         'pending',
     })
     .select()
     .single();
@@ -78,7 +79,7 @@ export async function activateSession(sessionId, interpreterId) {
 }
 
 /**
- * Update last_billed_at (heartbeat for billing engine)
+ * Update last_billed_at (legacy heartbeat — global billing intervals handle actual ticks)
  */
 export async function updateLastBilledAt(sessionId) {
   await supabaseAdmin
