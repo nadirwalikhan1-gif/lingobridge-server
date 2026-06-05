@@ -1,6 +1,6 @@
 ﻿// db/index.mjs — barrel export for all repositories
-export { default as interpreterRepo } from './interpreterRepo.mjs'
-export { default as sessionRepo } from './sessionRepo.mjs'
-export { default as transactionRepo } from './transactionRepo.mjs'
-export { default as userRepo } from './userRepo.mjs'
-export { default as walletRepo } from './walletRepo.mjs'
+export * from './interpreterRepo.mjs'
+export * from './sessionRepo.mjs'
+export * from './transactionRepo.mjs'
+export * from './userRepo.mjs'
+export * from './walletRepo.mjs'
