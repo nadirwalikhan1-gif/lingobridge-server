@@ -69,4 +69,6 @@ export const SOCKET_EVENTS = {
 // Released if the session is cancelled before it starts.
 export const RESERVATION_AMOUNT = {
   USD: { audio: 5.00, video: 5.00 },
-};
+};// ─── Stale session cleanup ────────────────────────────────────────────────────
+// Sessions still 'active' after this many hours are force-ended by the cron job.
+export const STALE_SESSION_THRESHOLD_HOURS = 3;
