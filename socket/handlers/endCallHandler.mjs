@@ -10,7 +10,7 @@ export function endCallHandler(io, socket) {
   // ── EXPLICIT END CALL ──────────────────────────────────────────────────────
   socket.on('end-call', async (data) => {
     if (!rateLimitSocket(socket, 'end-call')) return;
-    const { valid, errors, errors, sanitized } = validateEvent('end-call', data);
+    const { valid, errors, sanitized } = validateEvent('end-call', data);
     if (!valid) { socket.emit('error', { errors }); return; }
     await _endRoom(io, socket, sanitized.roomId, 'user_ended');
   });
