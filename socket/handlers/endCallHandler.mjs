@@ -1,6 +1,5 @@
 import { logger } from '../../config/logger.mjs';
-import { endSession } from '../../services/billingService.mjs';        // FIX: vault-model endSession
-import { stopBilling } from '../../services/billingService.mjs';
+import { endSession } from '../../services/billingService.mjs';
 import { setInterpreterAvailability } from '../../db/interpreterRepo.mjs';
 import { getRoom, deleteRoom, getRoomsForSocket } from '../runtime/sessionRuntime.mjs';
 import { rateLimitSocket } from '../../middleware/rateLimiter.mjs';
@@ -8,24 +7,20 @@ import { validateEvent } from '../../middleware/validateEvent.mjs';
 import { audit, AUDIT_ACTIONS } from '../../services/auditService.mjs';
 
 export function endCallHandler(io, socket) {
-  // ── EXPLICIT END CALL ────────────────────────────────────────
+  // ── EXPLICIT END CALL ──────────────────────────────────────────────────────
   socket.on('end-call', async (data) => {
     if (!rateLimitSocket(socket, 'end-call')) return;
-
-    const { valid, errors, sanitized } = validateEvent('end-call', data);
+    const { valid, errors, errors, sanitized } = validateEvent('end-call', data);
     if (!valid) { socket.emit('error', { errors }); return; }
-
     await _endRoom(io, socket, sanitized.roomId, 'user_ended');
   });
 
-  // ── DISCONNECT ───────────────────────────────────────────────
+  // ── DISCONNECT ─────────────────────────────────────────────────────────────
   socket.on('disconnect', async (reason) => {
     logger.info({ socketId: socket.id, userId: socket.userId, reason }, 'Socket disconnected');
-
     if (socket.interpreterRole) {
       await setInterpreterAvailability(socket.userId, false).catch(() => {});
     }
-
     const roomIds = getRoomsForSocket(socket.id);
     for (const roomId of roomIds) {
       await _endRoom(io, socket, roomId, 'disconnect').catch((err) =>
@@ -36,7 +31,9 @@ export function endCallHandler(io, socket) {
 }
 
 /**
- * Shared end-room logic
+ * Shared end-room logic.
+ * stopBilling removed — billing refactor uses global setInterval ticks;
+ * there is no per-session billing tracker to stop.
  */
 async function _endRoom(io, socket, roomId, reason) {
   const room = getRoom(roomId);
@@ -44,15 +41,10 @@ async function _endRoom(io, socket, roomId, reason) {
 
   deleteRoom(roomId);
 
-  // Clear billing tracker (global intervals handle actual per-minute billing)
-  if (room.sessionId) {
-    stopBilling(room.sessionId);
-  }
-
   // Notify both parties
   io.to(roomId).emit('call-ended', { reason });
 
-  // End session in DB — vault-model billing already processed per-minute
+  // Close session record in DB — per-minute billing already processed by ticks
   if (room.sessionId) {
     await endSession(room.sessionId).catch((err) =>
       logger.error({ err, roomId, sessionId: room.sessionId }, 'endSession failed')
