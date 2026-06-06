@@ -99,7 +99,14 @@ app.use('/webhook', (req, res, next) => {
 app.use(express.json({ limit: '512kb' }));
 
 // ── ROUTES ───────────────────────────────────────────────────
-app.use('/health',               healthRouter);
+// Replace this:
+app.use('/health', healthRouter);
+
+// With this:
+app.get('/health', async (req, res, next) => {
+  req.url = '/';
+  healthRouter(req, res, next);
+});
 app.use('/webhook/lemonsqueezy', webhookRouter);
 app.use('/create-checkout',      checkoutRouter);
 app.use('/agora',                agoraRouter);
