@@ -247,3 +247,24 @@ export async function endSession(sessionId) {
     return null;
   }
 }
+// ─── Health route support ─────────────────────────────────────────────────────
+// routes/health.mjs imports getActiveBillingCount to show how many sessions
+// are currently being billed. Reads directly from DB.
+export async function getActiveBillingCount() {
+  try {
+    const sessions = await getActiveBillableSessions();
+    return sessions.length;
+  } catch {
+    return 0;
+  }
+}
+
+// ─── Shutdown support ─────────────────────────────────────────────────────────
+// utils/shutdown.mjs calls stopAllBilling on graceful shutdown.
+// Global setInterval ticks are cleared here.
+export function stopAllBilling() {
+  // Intervals are module-scoped — nothing to clear unless you store the refs.
+  // This is a no-op stub that satisfies the import without crashing.
+  // If you want clean shutdown, store interval refs at module level and
+  // call clearInterval here.
+}

@@ -71,4 +71,32 @@ export const RESERVATION_AMOUNT = {
   USD: { audio: 5.00, video: 5.00 },
 };// ─── Stale session cleanup ────────────────────────────────────────────────────
 // Sessions still 'active' after this many hours are force-ended by the cron job.
+export const STALE_SESSION_THRESHOLD_HOURS = 3;// ─── Reservation amounts ───────────────────────────────────────────────────────
+// Held in client vault when session created, released if cancelled before start.
+export const RESERVATION_AMOUNT = {
+  USD: { audio: 5.00, video: 5.00 },
+};
+
+// ─── Stale session threshold ───────────────────────────────────────────────────
 export const STALE_SESSION_THRESHOLD_HOURS = 3;
+
+// ─── Top-up amounts ────────────────────────────────────────────────────────────
+export const TOPUP_AMOUNTS = {
+  USD: [10, 25, 50, 100],
+};
+
+// ─── LemonSqueezy variant IDs ──────────────────────────────────────────────────
+// Set via environment variables — values populated in Railway dashboard.
+export const LEMON_VARIANTS = {
+  USD: {
+    10:  process.env.LS_VARIANT_USD_10  || null,
+    25:  process.env.LS_VARIANT_USD_25  || null,
+    50:  process.env.LS_VARIANT_USD_50  || null,
+    100: process.env.LS_VARIANT_USD_100 || null,
+  },
+};
+
+// ─── Legacy billing rates alias ────────────────────────────────────────────────
+// utils/billing.mjs imports BILLING_RATES — alias to CLIENT_RATES so that
+// file keeps working without changes.
+export const BILLING_RATES = CLIENT_RATES;
