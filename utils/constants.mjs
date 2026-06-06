@@ -17,16 +17,16 @@ export const INTERPRETER_RATES = {
 
 // ─── Hold billing ──────────────────────────────────────────────────────────────
 
-// What the INTERPRETER earns per minute during any hold — flat, regardless of type.
-export const INTERPRETER_HOLD_RATE = 0.10; // per minute
+// What the INTERPRETER earns per minute during any hold - flat, regardless of type.
+export const INTERPRETER_HOLD_RATE = 0.10;
 
 // What the CLIENT is charged per minute during hold, in three tiers.
 // upTo is in MINUTES. Rates are explicit round figures, no multiplier math.
 //
 // Tier logic:
-//   0–5 min hold   → client pays $0.00   (platform absorbs interpreter hold pay)
-//   5–10 min hold  → client pays flat rate (audio $0.65, video $0.75)
-//   10+ min hold   → client pays full active rate (audio $1.49, video $1.79)
+//   0-5 min hold   -> client pays $0.00   (platform absorbs interpreter hold pay)
+//   5-10 min hold  -> client pays flat rate (audio $0.65, video $0.75)
+//   10+ min hold   -> client pays full active rate (audio $1.49, video $1.79)
 export const HOLD_TIERS = {
   audio: [
     { upTo: 5,        rate: 0.00 },
@@ -43,15 +43,17 @@ export const HOLD_TIERS = {
 // ─── Payout thresholds ─────────────────────────────────────────────────────────
 
 // Interpreter must have at least this much in their vault before requesting payout.
-// No maximum — they can request any amount above this threshold.
+// No maximum - they can request any amount above this threshold.
 export const MIN_PAYOUT = 50.00;
 
 // ─── Platform vault sentinel ───────────────────────────────────────────────────
 
 // Fixed UUID used as user_id for the platform wallet row.
-// Seeded once via migration — never belongs to a real user.
+// Seeded once via migration - never belongs to a real user.
 export const PLATFORM_VAULT_ID = '00000000-0000-0000-0000-000000000000';
+
 // ─── Socket event name constants ──────────────────────────────────────────────
+
 // Centralised event names used by both socket/index.mjs and client listeners.
 // Prevents typo mismatches between emitter and listener.
 export const SOCKET_EVENTS = {
@@ -64,29 +66,30 @@ export const SOCKET_EVENTS = {
   PAYOUT_RESPONSE:          'payout-response',
   PENDING_REQUESTS:         'pending-requests',
   SESSION_ERROR:            'session-error',
-};// ─── Reservation amounts ───────────────────────────────────────────────────────
+};
+
+// ─── Reservation amounts ───────────────────────────────────────────────────────
+
 // Amount held in client vault when a session is created (pending state).
 // Released if the session is cancelled before it starts.
-export const RESERVATION_AMOUNT = {
-  USD: { audio: 5.00, video: 5.00 },
-};// ─── Stale session cleanup ────────────────────────────────────────────────────
-// Sessions still 'active' after this many hours are force-ended by the cron job.
-export const STALE_SESSION_THRESHOLD_HOURS = 3;// ─── Reservation amounts ───────────────────────────────────────────────────────
-// Held in client vault when session created, released if cancelled before start.
 export const RESERVATION_AMOUNT = {
   USD: { audio: 5.00, video: 5.00 },
 };
 
 // ─── Stale session threshold ───────────────────────────────────────────────────
+
+// Sessions still 'active' after this many hours are force-ended by the cron job.
 export const STALE_SESSION_THRESHOLD_HOURS = 3;
 
 // ─── Top-up amounts ────────────────────────────────────────────────────────────
+
 export const TOPUP_AMOUNTS = {
   USD: [10, 25, 50, 100],
 };
 
 // ─── LemonSqueezy variant IDs ──────────────────────────────────────────────────
-// Set via environment variables — values populated in Railway dashboard.
+
+// Set via environment variables - values populated in Railway dashboard.
 export const LEMON_VARIANTS = {
   USD: {
     10:  process.env.LS_VARIANT_USD_10  || null,
@@ -97,6 +100,7 @@ export const LEMON_VARIANTS = {
 };
 
 // ─── Legacy billing rates alias ────────────────────────────────────────────────
-// utils/billing.mjs imports BILLING_RATES — alias to CLIENT_RATES so that
+
+// utils/billing.mjs imports BILLING_RATES - alias to CLIENT_RATES so that
 // file keeps working without changes.
 export const BILLING_RATES = CLIENT_RATES;
