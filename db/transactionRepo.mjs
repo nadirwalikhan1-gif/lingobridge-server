@@ -4,12 +4,12 @@ import { supabaseAdmin } from '../config/supabase.mjs';
  * Insert a transaction record.
  * Vault-model aware: tracks vault_type and reference_id for audit trails.
  */
-export async function insertTransaction({ 
-  userId, 
-  amount, 
-  currency, 
-  type, 
-  description, 
+export async function insertTransaction({
+  userId,
+  amount,
+  currency,
+  type,
+  description,
   sessionId,
   referenceId,   // vault-model: links to session or other entity
   vaultType,     // vault-model: 'client' | 'interpreter' | 'platform'
@@ -34,7 +34,7 @@ export async function insertTransaction({
 }
 
 /**
- * Get transactions for a user (optionally filtered by vault type)
+ * Get transactions for a user (optionally filtered by vault type).
  */
 export async function getTransactionsByUser(userId, limit = 20, offset = 0, vaultType = null) {
   let query = supabaseAdmin
@@ -55,7 +55,7 @@ export async function getTransactionsByUser(userId, limit = 20, offset = 0, vaul
 }
 
 /**
- * Check if a webhook event was already processed (idempotency)
+ * Check if a webhook event was already processed (idempotency).
  */
 export async function isWebhookProcessed(eventId) {
   const { data } = await supabaseAdmin
@@ -68,7 +68,7 @@ export async function isWebhookProcessed(eventId) {
 }
 
 /**
- * Log webhook event
+ * Log webhook event.
  */
 export async function logWebhookEvent({ eventId, provider, payload }) {
   const { error } = await supabaseAdmin

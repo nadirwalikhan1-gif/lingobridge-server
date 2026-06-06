@@ -35,9 +35,7 @@ export async function getAvailableBalance(userId, vaultType = 'client') {
  * Credit wallet atomically via DB RPC.
  *
  * NOTE: The Postgres function `credit_wallet_topup` must accept `p_vault_type`.
- * If your SQL function doesn't have it yet, run this migration:
- *
- * ── SQL MIGRATION ─────────────────────────────────────────────
+ * ── SQL MIGRATION ──────────────────────────────────────────────────────────────
  * CREATE OR REPLACE FUNCTION credit_wallet_topup(
  *   p_user_id UUID,
  *   p_amount  NUMERIC,
@@ -55,7 +53,7 @@ export async function getAvailableBalance(userId, vaultType = 'client') {
  *   END IF;
  *   RETURN v_wallet;
  * END; $$;
- * ──────────────────────────────────────────────────────────────
+ * ──────────────────────────────────────────────────────────────────────────────
  */
 export async function creditWallet(userId, amount, vaultType = 'client') {
   const { data, error } = await supabaseAdmin
@@ -74,7 +72,7 @@ export async function creditWallet(userId, amount, vaultType = 'client') {
  * Reserve funds atomically via DB function.
  *
  * NOTE: Postgres function `reserve_wallet_funds` must accept `p_vault_type`.
- * ── SQL MIGRATION ─────────────────────────────────────────────
+ * ── SQL MIGRATION ──────────────────────────────────────────────────────────────
  * CREATE OR REPLACE FUNCTION reserve_wallet_funds(
  *   p_user_id UUID,
  *   p_amount  NUMERIC,
@@ -104,7 +102,7 @@ export async function creditWallet(userId, amount, vaultType = 'client') {
  *
  *   RETURN jsonb_build_object('success', true);
  * END; $$;
- * ──────────────────────────────────────────────────────────────
+ * ──────────────────────────────────────────────────────────────────────────────
  */
 export async function reserveFunds(userId, amount, vaultType = 'client') {
   const { data, error } = await supabaseAdmin
@@ -122,7 +120,7 @@ export async function reserveFunds(userId, amount, vaultType = 'client') {
  * Release reservation via DB function.
  *
  * NOTE: Postgres function `release_wallet_reservation` must accept `p_vault_type`.
- * ── SQL MIGRATION ─────────────────────────────────────────────
+ * ── SQL MIGRATION ──────────────────────────────────────────────────────────────
  * CREATE OR REPLACE FUNCTION release_wallet_reservation(
  *   p_user_id UUID,
  *   p_amount  NUMERIC,
@@ -133,7 +131,7 @@ export async function reserveFunds(userId, amount, vaultType = 'client') {
  *   SET reserved_balance = GREATEST(0, reserved_balance - p_amount)
  *   WHERE user_id = p_user_id AND vault_type = p_vault_type;
  * END; $$;
- * ──────────────────────────────────────────────────────────────
+ * ──────────────────────────────────────────────────────────────────────────────
  */
 export async function releaseReservation(userId, amount, vaultType = 'client') {
   const { error } = await supabaseAdmin
@@ -150,7 +148,7 @@ export async function releaseReservation(userId, amount, vaultType = 'client') {
  * Atomic deduction via DB function (with SELECT FOR UPDATE).
  *
  * NOTE: Postgres function `deduct_wallet_for_session` must accept `p_vault_type`.
- * ── SQL MIGRATION ─────────────────────────────────────────────
+ * ── SQL MIGRATION ──────────────────────────────────────────────────────────────
  * CREATE OR REPLACE FUNCTION deduct_wallet_for_session(
  *   p_user_id     UUID,
  *   p_session_id  UUID,
@@ -180,7 +178,7 @@ export async function releaseReservation(userId, amount, vaultType = 'client') {
  *
  *   RETURN jsonb_build_object('success', true);
  * END; $$;
- * ──────────────────────────────────────────────────────────────
+ * ──────────────────────────────────────────────────────────────────────────────
  */
 export async function deductWallet(userId, sessionId, amount, description, vaultType = 'client') {
   const { data, error } = await supabaseAdmin
@@ -211,4 +209,74 @@ export async function getStaleReservations(thresholdMinutes = 2) {
 
   if (error) throw new Error(`Stale reservation fetch failed: ${error.message}`);
   return data || [];
+}
+
+// ─── Payout requests ──────────────────────────────────────────────────────────
+
+/**
+ * Create a payout request for an interpreter.
+ * Requires payout_requests table — see migration in README.
+ */
+export async function createPayoutRequest(interpreterId, amount) {
+  const { data, error } = await supabaseAdmin
+    .from('payout_requests')
+    .insert({
+      interpreter_id: interpreterId,
+      amount,
+      status:         'pending',
+      requested_at:   new Date().toISOString(),
+    })
+    .select()
+    .single();
+
+  if (error) throw new Error(`Payout request failed: ${error.message}`);
+  return data;
+}
+
+/**
+ * Get all payout requests for an interpreter.
+ */
+export async function getPayoutRequestsByInterpreter(interpreterId, limit = 20, offset = 0) {
+  const { data, error } = await supabaseAdmin
+    .from('payout_requests')
+    .select('*')
+    .eq('interpreter_id', interpreterId)
+    .order('requested_at', { ascending: false })
+    .range(offset, offset + limit - 1);
+
+  if (error) throw new Error(`Payout requests fetch failed: ${error.message}`);
+  return data || [];
+}
+
+/**
+ * Get all pending payout requests (admin use).
+ */
+export async function getPendingPayoutRequests() {
+  const { data, error } = await supabaseAdmin
+    .from('payout_requests')
+    .select('*, interpreter:interpreter_id(id, email, user_metadata)')
+    .eq('status', 'pending')
+    .order('requested_at', { ascending: true });
+
+  if (error) throw new Error(`Pending payouts fetch failed: ${error.message}`);
+  return data || [];
+}
+
+/**
+ * Update payout request status (admin use).
+ */
+export async function updatePayoutRequestStatus(requestId, status, notes = null) {
+  const { data, error } = await supabaseAdmin
+    .from('payout_requests')
+    .update({
+      status,
+      notes,
+      resolved_at: new Date().toISOString(),
+    })
+    .eq('id', requestId)
+    .select()
+    .single();
+
+  if (error) throw new Error(`Payout status update failed: ${error.message}`);
+  return data;
 }
