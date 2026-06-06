@@ -7,7 +7,6 @@ import {
   getStaleSessions,
 } from '../db/sessionRepo.mjs';
 import { releaseReservation } from '../db/walletRepo.mjs';
-import { stopBilling } from '../services/billingService.mjs'; // FIX: stale session cleanup
 import { RESERVATION_AMOUNT } from '../utils/constants.mjs';
 
 /**
@@ -88,8 +87,8 @@ export async function forceEndStaleSessions(thresholdHours = 3) {
 
   for (const s of sessions) {
     try {
-      await endSession(s.id, 'force');
-      stopBilling(s.id); // FIX: clear billing tracker to prevent Map leak
+        await endSession(s.id, 'force');
+      // stopBilling removed — billing refactor uses global ticks, no per-session tracker
     } catch (err) {
       logger.error({ err, sessionId: s.id }, 'Force-end failed');
     }

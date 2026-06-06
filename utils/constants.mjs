@@ -64,4 +64,9 @@ export const SOCKET_EVENTS = {
   PAYOUT_RESPONSE:          'payout-response',
   PENDING_REQUESTS:         'pending-requests',
   SESSION_ERROR:            'session-error',
+};// ─── Reservation amounts ───────────────────────────────────────────────────────
+// Amount held in client vault when a session is created (pending state).
+// Released if the session is cancelled before it starts.
+export const RESERVATION_AMOUNT = {
+  USD: { audio: 5.00, video: 5.00 },
 };
