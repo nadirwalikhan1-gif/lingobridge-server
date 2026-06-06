@@ -51,3 +51,17 @@ export const MIN_PAYOUT = 50.00;
 // Fixed UUID used as user_id for the platform wallet row.
 // Seeded once via migration — never belongs to a real user.
 export const PLATFORM_VAULT_ID = '00000000-0000-0000-0000-000000000000';
+// ─── Socket event name constants ──────────────────────────────────────────────
+// Centralised event names used by both socket/index.mjs and client listeners.
+// Prevents typo mismatches between emitter and listener.
+export const SOCKET_EVENTS = {
+  BALANCE_UPDATE:           'balance-update',
+  CALL_ENDED:               'call-ended',
+  HOLD_SESSION:             'hold-session',
+  HOLD_RESUMED:             'hold-resumed',
+  EXTEND_SESSION_CONFIRMED: 'extend-session-confirmed',
+  EXTEND_SESSION_DENIED:    'extend-session-denied',
+  PAYOUT_RESPONSE:          'payout-response',
+  PENDING_REQUESTS:         'pending-requests',
+  SESSION_ERROR:            'session-error',
+};
