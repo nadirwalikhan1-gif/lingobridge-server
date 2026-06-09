@@ -3,7 +3,6 @@ import { getActiveBillingCount } from '../services/billingService.mjs';
 import { getRoomCount } from '../socket/runtime/sessionRuntime.mjs';
 import { isRedisAvailable } from '../config/redis.mjs';
 import { supabaseAdmin } from '../config/supabase.mjs';
-import v1Router from './routes/v1.mjs';
 
 const router = Router();
 
