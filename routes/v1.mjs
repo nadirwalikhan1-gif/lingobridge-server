@@ -43,7 +43,7 @@ router.get('/dashboard/stats', requireAuth, async (req, res) => {
 
     // Favourites count
     const { count: favourites } = await supabaseAdmin
-      .from('favourites')
+      .from('favorites')
       .select('*', { count: 'exact', head: true })
       .eq('client_id', userId);
 
@@ -344,7 +344,7 @@ router.get('/favourites', requireAuth, async (req, res) => {
     const offset = (page - 1) * limit;
 
     const { data, error, count } = await supabaseAdmin
-      .from('favourites')
+      .from('favorites')
       .select('*, interpreter:interpreter_id(*)', { count: 'exact' })
       .eq('client_id', req.user.id)
       .order('created_at', { ascending: false })
@@ -363,7 +363,7 @@ router.post('/favourites', requireAuth, async (req, res) => {
   try {
     const { interpreterId } = req.body;
     const { data, error } = await supabaseAdmin
-      .from('favourites')
+      .from('favorites')
       .insert({ client_id: req.user.id, interpreter_id: interpreterId })
       .select()
       .single();
@@ -380,7 +380,7 @@ router.post('/favourites', requireAuth, async (req, res) => {
 router.delete('/favourites/:interpreterId', requireAuth, async (req, res) => {
   try {
     const { error } = await supabaseAdmin
-      .from('favourites')
+      .from('favorites')
       .delete()
       .eq('client_id', req.user.id)
       .eq('interpreter_id', req.params.interpreterId);
@@ -450,3 +450,5 @@ router.get('/messages', requireAuth, async (req, res) => {
 });
 
 export default router;
+
+
