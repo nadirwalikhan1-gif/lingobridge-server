@@ -7,7 +7,6 @@ import { supabaseAdmin } from '../config/supabase.mjs';
 const router = Router();
 
 router.get('/', async (req, res) => {
-  // FIX: add Supabase connectivity check
   let supabaseHealthy = false;
   try {
     const { error } = await supabaseAdmin.from('users').select('id').limit(1);
@@ -16,15 +15,22 @@ router.get('/', async (req, res) => {
     supabaseHealthy = false;
   }
 
-  res.json({
-    status:         'ok',
-    uptime:         Math.round(process.uptime()),
-    env:            process.env.NODE_ENV || 'development',
-    activeRooms:    getRoomCount(),
-    activeBilling:  getActiveBillingCount(),
-    redis:          isRedisAvailable(),
-    supabase:       supabaseHealthy,
-    timestamp:      new Date().toISOString(),
+  let activeBilling = 0;
+  try {
+    activeBilling = await getActiveBillingCount();
+  } catch {
+    activeBilling = 0;
+  }
+
+  res.status(200).json({
+    status:        'ok',
+    uptime:        Math.round(process.uptime()),
+    env:           process.env.NODE_ENV || 'development',
+    activeRooms:   getRoomCount(),
+    activeBilling,
+    redis:         isRedisAvailable(),
+    supabase:      supabaseHealthy,
+    timestamp:     new Date().toISOString(),
   });
 });
 
