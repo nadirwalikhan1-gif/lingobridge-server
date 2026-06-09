@@ -31,6 +31,7 @@ import webhookRouter  from './routes/webhook.mjs';
 import checkoutRouter from './routes/checkout.mjs';
 import agoraRouter    from './routes/agora.mjs';
 import healthRouter   from './routes/health.mjs';
+import v1Router from './routes/v1.mjs';
 
 const PORT            = process.env.PORT || 3001;
 // FIX: Default includes production client + common dev ports
@@ -110,6 +111,7 @@ app.get('/health', async (req, res, next) => {
 app.use('/webhook/lemonsqueezy', webhookRouter);
 app.use('/create-checkout',      checkoutRouter);
 app.use('/agora',                agoraRouter);
+app.use('/v1', v1Router);
 
 // 404 handler
 app.use((req, res) => {
