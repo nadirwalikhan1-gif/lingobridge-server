@@ -345,7 +345,7 @@ router.get('/favourites', requireAuth, async (req, res) => {
 
     const { data, error, count } = await supabaseAdmin
       .from('favorites')
-      .select('*, interpreter:interpreter_id(*)', { count: 'exact' })
+      .select('*', { count: 'exact' })
       .eq('client_id', req.user.id)
       .order('created_at', { ascending: false })
       .range(offset, offset + limit - 1);
@@ -450,5 +450,6 @@ router.get('/messages', requireAuth, async (req, res) => {
 });
 
 export default router;
+
 
 
