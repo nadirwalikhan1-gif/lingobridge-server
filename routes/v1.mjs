@@ -467,26 +467,26 @@ router.get('/messages', requireAuth, async (req, res) => {
 // Helper: get or create team for user
 async function getUserTeam(userId) {
   try {
-    // Use maybeSingle() — returns null instead of error when no rows
-    const { data: existingTeam, error: fetchError } = await supabaseAdmin
+    // Use .limit(1) instead of .single() to avoid "multiple rows" error
+    const { data: teams, error: fetchError } = await supabaseAdmin
       .from('teams')
       .select('*')
       .eq('owner_id', userId)
-      .maybeSingle();
+      .limit(1);
 
     if (fetchError) {
-      console.error('🔥 Fetch team error:', fetchError.message, fetchError.details);
+      console.error('🔥 Fetch team error:', fetchError.message);
       throw fetchError;
     }
 
-    if (existingTeam) {
-      return existingTeam;
+    if (teams && teams.length > 0) {
+      return teams[0];
     }
 
     // No team exists — create one
     console.log('🆕 Creating new team for user:', userId);
     
-    const { data: newTeam, error: createError } = await supabaseAdmin
+    const { data: inserted, error: createError } = await supabaseAdmin
       .from('teams')
       .insert({
         owner_id: userId,
@@ -498,18 +498,20 @@ async function getUserTeam(userId) {
         billing_cycle: 'Monthly',
         next_invoice: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
       })
-      .select()
-      .single();
+      .select();
 
     if (createError) {
-      console.error('🔥 Create team error:', createError.message, createError.details, createError.hint);
+      console.error('🔥 Create team error:', createError.message);
       throw createError;
     }
 
-    console.log('✅ Team created:', newTeam?.id);
-    return newTeam;
+    if (!inserted || inserted.length === 0) {
+      throw new Error('Team insert returned no rows');
+    }
+
+    return inserted[0];
   } catch (err) {
-    console.error('🔥 getUserTeam FAILED:', err.message, err.code, err.details);
+    console.error('🔥 getUserTeam FAILED:', err.message, err.code);
     throw err;
   }
 }
