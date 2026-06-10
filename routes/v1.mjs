@@ -6,6 +6,16 @@ import { logger } from '../config/logger.mjs';
 
 const router = Router();
 
+// ── Token helper (add this here) ──────────────────────────────────────────────
+function generateToken() {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+    const r = Math.random() * 16 | 0;
+    return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+  });
+}
 // ── Auth middleware ────────────────────────────────────────────────────────────
 async function requireAuth(req, res, next) {
   const auth = req.headers.authorization;
@@ -603,7 +613,7 @@ router.post('/teams/me/invitations', requireAuth, async (req, res) => {
         role: role || 'member',
         department: department || null,
         status: 'invited',
-        token: crypto.randomUUID(),
+        token: generateToken(),
         expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
       })
       .select()
@@ -706,7 +716,7 @@ router.get('/teams/me/invite-link', requireAuth, async (req, res) => {
         .from('team_invite_links')
         .insert({
           team_id: team.id,
-          url: `${process.env.CLIENT_URL || 'https://lingobridge-client.vercel.app'}/join-team?token=${crypto.randomUUID()}`,
+          url: `${process.env.CLIENT_URL || 'https://lingobridge-client.vercel.app'}/join-team?token=${generateToken()}`,
           expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
         })
         .select()
