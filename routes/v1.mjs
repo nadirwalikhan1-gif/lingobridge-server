@@ -520,16 +520,18 @@ async function getUserTeam(userId) {
 router.get('/teams/me', requireAuth, async (req, res) => {
   try {
     const team = await getUserTeam(req.user.id);
-    res.json({
-      id: team.id,
-      name: team.name,
-      plan: team.plan,
-      seats: team.seats,
-      departments: team.departments || [],
-      rates: team.rates || { video: 1.79, audio: 1.49 },
-      billingCycle: team.billing_cycle,
-      nextInvoice: team.next_invoice,
-    });
+   res.json({
+  data: {
+    id: team.id,
+    name: team.name,
+    plan: team.plan,
+    seats: team.seats,
+    departments: team.departments || [],
+    rates: team.rates || { video: 1.79, audio: 1.49 },
+    billingCycle: team.billing_cycle,
+    nextInvoice: team.next_invoice,
+  }
+});
   } catch (err) {
     logger.error({ err }, 'Team fetch error');
     res.status(500).json({ error: 'Failed to load team' });
@@ -571,7 +573,9 @@ router.get('/teams/me/members', requireAuth, async (req, res) => {
     if (error) throw error;
 
     const totalPages = Math.ceil((count || 0) / limit);
-    res.json({ members: data || [], totalPages, totalCount: count || 0 });
+    res.json({
+  data: { members: data || [], totalPages, totalCount: count || 0 }
+});
   } catch (err) {
     logger.error({ err }, 'Team members error');
     res.status(500).json({ error: 'Failed to load members' });
@@ -601,11 +605,13 @@ router.get('/teams/me/stats', requireAuth, async (req, res) => {
     const monthlySpend = (sessions || []).reduce((sum, s) => sum + (s.cost || 0), 0);
     const totalSessions = sessions?.length || 0;
 
-    res.json({
-      monthlySpend,
-      totalSessions,
-      activeMembers: activeMembers || 0,
-    });
+ res.json({
+  data: {
+    monthlySpend,
+    totalSessions,
+    activeMembers: activeMembers || 0,
+  }
+});
   } catch (err) {
     logger.error({ err }, 'Team stats error');
     res.status(500).json({ error: 'Failed to load stats' });
@@ -745,7 +751,9 @@ router.get('/teams/me/invite-link', requireAuth, async (req, res) => {
         .single();
 
       if (createErr) throw createErr;
-      return res.json({ url: newLink.url, expiresAt: newLink.expires_at });
+      return res.json({
+  data: { url: data.url, expiresAt: data.expires_at }
+});
     }
 
     res.json({ url: data.url, expiresAt: data.expires_at });
