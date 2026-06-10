@@ -449,7 +449,331 @@ router.get('/messages', requireAuth, async (req, res) => {
   }
 });
 
+// ══════════════════════════════════════════════════════════════════════════════
+// ── TEAM ROUTES ─────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Helper: get or create team for user
+async function getUserTeam(userId) {
+  const { data, error } = await supabaseAdmin
+    .from('teams')
+    .select('*')
+    .eq('owner_id', userId)
+    .single();
+
+  if (error || !data) {
+    const { data: newTeam, error: createErr } = await supabaseAdmin
+      .from('teams')
+      .insert({
+        owner_id: userId,
+        name: 'Your Team',
+        plan: 'Starter',
+        seats: 5,
+        departments: ['General'],
+        rates: { video: 1.79, audio: 1.49 },
+        billing_cycle: 'Monthly',
+        next_invoice: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+      })
+      .select()
+      .single();
+
+    if (createErr) throw createErr;
+    return newTeam;
+  }
+
+  return data;
+}
+
+// GET /v1/teams/me
+router.get('/teams/me', requireAuth, async (req, res) => {
+  try {
+    const team = await getUserTeam(req.user.id);
+    res.json({
+      id: team.id,
+      name: team.name,
+      plan: team.plan,
+      seats: team.seats,
+      departments: team.departments || [],
+      rates: team.rates || { video: 1.79, audio: 1.49 },
+      billingCycle: team.billing_cycle,
+      nextInvoice: team.next_invoice,
+    });
+  } catch (err) {
+    logger.error({ err }, 'Team fetch error');
+    res.status(500).json({ error: 'Failed to load team' });
+  }
+});
+
+// GET /v1/teams/me/members
+router.get('/teams/me/members', requireAuth, async (req, res) => {
+  try {
+    const team = await getUserTeam(req.user.id);
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const offset = (page - 1) * limit;
+    const search = req.query.search || '';
+    const roleFilter = req.query.role || 'all';
+    const deptFilter = req.query.department || 'all';
+    const sortBy = req.query.sort || 'name_asc';
+
+    let query = supabaseAdmin
+      .from('team_members')
+      .select('*', { count: 'exact' })
+      .eq('team_id', team.id);
+
+    if (roleFilter !== 'all') query = query.eq('role', roleFilter);
+    if (deptFilter !== 'all') query = query.eq('department', deptFilter);
+    if (search) query = query.or(`name.ilike.%${search}%,email.ilike.%${search}%`);
+
+    const sortMap = {
+      name_asc: { column: 'name', ascending: true },
+      name_desc: { column: 'name', ascending: false },
+      spend_desc: { column: 'spend_this_month', ascending: false },
+      sessions_desc: { column: 'sessions_this_month', ascending: false },
+      recent: { column: 'last_active', ascending: false },
+    };
+    const sort = sortMap[sortBy] || sortMap.name_asc;
+    query = query.order(sort.column, { ascending: sort.ascending });
+
+    const { data, error, count } = await query.range(offset, offset + limit - 1);
+    if (error) throw error;
+
+    const totalPages = Math.ceil((count || 0) / limit);
+    res.json({ members: data || [], totalPages, totalCount: count || 0 });
+  } catch (err) {
+    logger.error({ err }, 'Team members error');
+    res.status(500).json({ error: 'Failed to load members' });
+  }
+});
+
+// GET /v1/teams/me/stats
+router.get('/teams/me/stats', requireAuth, async (req, res) => {
+  try {
+    const team = await getUserTeam(req.user.id);
+    const { count: activeMembers } = await supabaseAdmin
+      .from('team_members')
+      .select('*', { count: 'exact', head: true })
+      .eq('team_id', team.id)
+      .eq('status', 'active');
+
+    const startOfMonth = new Date();
+    startOfMonth.setDate(1);
+    startOfMonth.setHours(0, 0, 0, 0);
+
+    const { data: sessions } = await supabaseAdmin
+      .from('sessions')
+      .select('cost')
+      .eq('team_id', team.id)
+      .gte('created_at', startOfMonth.toISOString());
+
+    const monthlySpend = (sessions || []).reduce((sum, s) => sum + (s.cost || 0), 0);
+    const totalSessions = sessions?.length || 0;
+
+    res.json({
+      monthlySpend,
+      totalSessions,
+      activeMembers: activeMembers || 0,
+    });
+  } catch (err) {
+    logger.error({ err }, 'Team stats error');
+    res.status(500).json({ error: 'Failed to load stats' });
+  }
+});
+
+// POST /v1/teams/me/invitations
+router.post('/teams/me/invitations', requireAuth, async (req, res) => {
+  try {
+    const { email, role, department } = req.body;
+    const team = await getUserTeam(req.user.id);
+
+    const { count: memberCount } = await supabaseAdmin
+      .from('team_members')
+      .select('*', { count: 'exact', head: true })
+      .eq('team_id', team.id);
+
+    if (memberCount >= team.seats) {
+      return res.status(400).json({ error: 'Team is at capacity' });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('team_invitations')
+      .insert({
+        team_id: team.id,
+        email,
+        role: role || 'member',
+        department: department || null,
+        status: 'invited',
+        token: crypto.randomUUID(),
+        expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.json({ invitation: data });
+  } catch (err) {
+    logger.error({ err }, 'Invite error');
+    res.status(500).json({ error: 'Failed to send invite' });
+  }
+});
+
+// DELETE /v1/teams/me/members/:id
+router.delete('/teams/me/members/:id', requireAuth, async (req, res) => {
+  try {
+    const { error } = await supabaseAdmin
+      .from('team_members')
+      .delete()
+      .eq('id', req.params.id);
+
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (err) {
+    logger.error({ err }, 'Remove member error');
+    res.status(500).json({ error: 'Failed to remove member' });
+  }
+});
+
+// PUT /v1/teams/me/members/:id/role
+router.put('/teams/me/members/:id/role', requireAuth, async (req, res) => {
+  try {
+    const { role } = req.body;
+    const { data, error } = await supabaseAdmin
+      .from('team_members')
+      .update({ role })
+      .eq('id', req.params.id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.json({ member: data });
+  } catch (err) {
+    logger.error({ err }, 'Role update error');
+    res.status(500).json({ error: 'Failed to update role' });
+  }
+});
+
+// PUT /v1/teams/me/members/:id/department
+router.put('/teams/me/members/:id/department', requireAuth, async (req, res) => {
+  try {
+    const { department } = req.body;
+    const { data, error } = await supabaseAdmin
+      .from('team_members')
+      .update({ department })
+      .eq('id', req.params.id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.json({ member: data });
+  } catch (err) {
+    logger.error({ err }, 'Department update error');
+    res.status(500).json({ error: 'Failed to update department' });
+  }
+});
+
+// POST /v1/teams/me/invitations/:id/resend
+router.post('/teams/me/invitations/:id/resend', requireAuth, async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('team_invitations')
+      .update({
+        expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+      })
+      .eq('id', req.params.id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.json({ invitation: data });
+  } catch (err) {
+    logger.error({ err }, 'Resend invite error');
+    res.status(500).json({ error: 'Failed to resend invitation' });
+  }
+});
+
+// GET /v1/teams/me/invite-link
+router.get('/teams/me/invite-link', requireAuth, async (req, res) => {
+  try {
+    const team = await getUserTeam(req.user.id);
+    const { data, error } = await supabaseAdmin
+      .from('team_invite_links')
+      .select('*')
+      .eq('team_id', team.id)
+      .single();
+
+    if (error || !data) {
+      const { data: newLink, error: createErr } = await supabaseAdmin
+        .from('team_invite_links')
+        .insert({
+          team_id: team.id,
+          url: `${process.env.CLIENT_URL || 'https://lingobridge-client.vercel.app'}/join-team?token=${crypto.randomUUID()}`,
+          expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+        })
+        .select()
+        .single();
+
+      if (createErr) throw createErr;
+      return res.json({ url: newLink.url, expiresAt: newLink.expires_at });
+    }
+
+    res.json({ url: data.url, expiresAt: data.expires_at });
+  } catch (err) {
+    logger.error({ err }, 'Invite link error');
+    res.status(500).json({ error: 'Failed to load invite link' });
+  }
+});
+
+// POST /v1/teams/me/invite-link/regenerate
+router.post('/teams/me/invite-link/regenerate', requireAuth, async (req, res) => {
+  try {
+    const team = await getUserTeam(req.user.id);
+    const { data, error } = await supabaseAdmin
+      .from('team_invite_links')
+      .upsert({
+        team_id: team.id,
+        url: `${process.env.CLIENT_URL || 'https://lingobridge-client.vercel.app'}/join-team?token=${crypto.randomUUID()}`,
+        expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.json({ url: data.url, expiresAt: data.expires_at });
+  } catch (err) {
+    logger.error({ err }, 'Regenerate link error');
+    res.status(500).json({ error: 'Failed to regenerate link' });
+  }
+});
+
+// GET /v1/teams/me/export
+router.get('/teams/me/export', requireAuth, async (req, res) => {
+  try {
+    const team = await getUserTeam(req.user.id);
+    const { data, error } = await supabaseAdmin
+      .from('team_members')
+      .select('*')
+      .eq('team_id', team.id);
+
+    if (error) throw error;
+
+    const format = req.query.format || 'csv';
+    if (format === 'csv') {
+      const headers = ['Name', 'Email', 'Role', 'Department', 'Status', 'Sessions', 'Spend'];
+      const rows = (data || []).map(m => [
+        m.name, m.email, m.role, m.department, m.status,
+        m.sessions_this_month || 0, m.spend_this_month || 0
+      ].join(','));
+      const csv = [headers.join(','), ...rows].join('\n');
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', 'attachment; filename="team-members.csv"');
+      return res.send(csv);
+    }
+
+    res.json({ members: data || [] });
+  } catch (err) {
+    logger.error({ err }, 'Export error');
+    res.status(500).json({ error: 'Failed to export' });
+  }
+});
+
 export default router;
-
-
-
