@@ -464,15 +464,29 @@ router.get('/messages', requireAuth, async (req, res) => {
 // ══════════════════════════════════════════════════════════════════════════════
 
 // Helper: get or create team for user
+// Helper: get or create team for user
 async function getUserTeam(userId) {
-  const { data, error } = await supabaseAdmin
-    .from('teams')
-    .select('*')
-    .eq('owner_id', userId)
-    .single();
+  try {
+    // Use maybeSingle() — returns null instead of error when no rows
+    const { data: existingTeam, error: fetchError } = await supabaseAdmin
+      .from('teams')
+      .select('*')
+      .eq('owner_id', userId)
+      .maybeSingle();
 
-  if (error || !data) {
-    const { data: newTeam, error: createErr } = await supabaseAdmin
+    if (fetchError) {
+      console.error('🔥 Fetch team error:', fetchError.message, fetchError.details);
+      throw fetchError;
+    }
+
+    if (existingTeam) {
+      return existingTeam;
+    }
+
+    // No team exists — create one
+    console.log('🆕 Creating new team for user:', userId);
+    
+    const { data: newTeam, error: createError } = await supabaseAdmin
       .from('teams')
       .insert({
         owner_id: userId,
@@ -487,11 +501,17 @@ async function getUserTeam(userId) {
       .select()
       .single();
 
-    if (createErr) throw createErr;
-    return newTeam;
-  }
+    if (createError) {
+      console.error('🔥 Create team error:', createError.message, createError.details, createError.hint);
+      throw createError;
+    }
 
-  return data;
+    console.log('✅ Team created:', newTeam?.id);
+    return newTeam;
+  } catch (err) {
+    console.error('🔥 getUserTeam FAILED:', err.message, err.code, err.details);
+    throw err;
+  }
 }
 
 // GET /v1/teams/me
