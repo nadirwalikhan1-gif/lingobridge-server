@@ -114,7 +114,7 @@ router.get('/sessions', requireAdmin, async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
       .from('sessions')
-      .select('*, client:users!sessions_client_id_fkey(full_name), interpreter:interpreters!sessions_interpreter_id_fkey(users(full_name))')
+      .select('*, client:users!sessions_client_id_fkey(full_name), interpreter:users!sessions_interpreter_id_fkey(full_name)')
       .order('created_at', { ascending: false })
       .limit(50);
     if (error) throw error;
@@ -130,10 +130,10 @@ router.get('/sessions', requireAdmin, async (req, res) => {
         fromLang:            s.language || 'EN',
         toLang:              s.language || 'EN',
         category:            s.purpose || 'General',
-        interpreter:         s.interpreter?.users?.full_name || 'Unassigned',
-        interpreterInitials: initials(s.interpreter?.users?.full_name),
+        interpreter:         s.interpreter?.full_name || 'Unassigned',
+        interpreterInitials: initials(s.interpreter?.full_name),
         client:              s.client?.full_name || 'Unknown',
-        ref:                 `#${s.id.slice(0, 8).toUpperCase()}`,
+        ref:                 `#${String(s.id).slice(0, 8).toUpperCase()}`,
         startedAt:           started ? started.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) : '—',
         elapsedMins,
       };
@@ -175,7 +175,7 @@ router.get('/transactions', requireAdmin, async (req, res) => {
       clientInit:  initials(t.users?.full_name),
       interpreter: 'Interpreter',
       interpInit:  'IN',
-      ref:         `TXN-${t.id.slice(0, 8).toUpperCase()}`,
+      ref:         `TXN-${String(t.id).slice(0, 8).toUpperCase()}`,
       date:        new Date(t.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
       currency:    t.currency || 'USD',
     })));
@@ -190,17 +190,27 @@ router.get('/disputes', requireAdmin, async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
       .from('disputes')
-      .select('*, raised_by_user:users!disputes_raised_by_fkey(full_name)')
+      .select('*')
       .order('created_at', { ascending: false })
       .limit(50);
     if (error) throw error;
 
+    const userIds = [...new Set((data || []).map(d => d.raised_by).filter(Boolean))];
+    let usersMap = {};
+    if (userIds.length) {
+      const { data: users } = await supabaseAdmin
+        .from('users')
+        .select('id, full_name')
+        .in('id', userIds);
+      usersMap = Object.fromEntries((users || []).map(u => [u.id, u]));
+    }
+
     res.json((data || []).map(d => ({
       id:          d.id,
       title:       d.reason || 'Dispute',
-      ref:         `#${d.id.slice(0, 8).toUpperCase()}`,
+      ref:         `#${String(d.id).slice(0, 8).toUpperCase()}`,
       status:      d.status || 'open',
-      client:      d.raised_by_user?.full_name || 'Unknown',
+      client:      usersMap[d.raised_by]?.full_name || 'Unknown',
       interpreter: null,
       amount:      null,
       timeAgo:     timeAgo(d.created_at),
@@ -227,7 +237,7 @@ router.get('/reviews', requireAdmin, async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
       .from('session_ratings')
-      .select('*, users!session_ratings_client_id_fkey(full_name), sessions(language)')
+      .select('*, users!session_ratings_rated_by_fkey(full_name), sessions(language)')
       .order('created_at', { ascending: false })
       .limit(50);
     if (error) throw error;
@@ -273,21 +283,34 @@ router.get('/payouts', requireAdmin, async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
       .from('payout_requests')
-      .select('*, users!payout_requests_interpreter_id_fkey(full_name, email)')
+      .select('*')
       .order('requested_at', { ascending: false })
       .limit(50);
     if (error) throw error;
 
-    res.json((data || []).map(p => ({
-      id:       p.id,
-      name:     p.users?.full_name || 'Unknown',
-      email:    p.users?.email || '',
-      initials: initials(p.users?.full_name),
-      amount:   `$${parseFloat(p.amount || 0).toFixed(2)}`,
-      status:   p.status || 'pending',
-      period:   new Date(p.requested_at).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }),
-      sessions: p.session_count || 0,
-    })));
+    const interpreterIds = [...new Set((data || []).map(p => p.interpreter_id).filter(Boolean))];
+    let usersMap = {};
+    if (interpreterIds.length) {
+      const { data: users } = await supabaseAdmin
+        .from('users')
+        .select('id, full_name, email')
+        .in('id', interpreterIds);
+      usersMap = Object.fromEntries((users || []).map(u => [u.id, u]));
+    }
+
+    res.json((data || []).map(p => {
+      const u = usersMap[p.interpreter_id];
+      return {
+        id:       p.id,
+        name:     u?.full_name || 'Unknown',
+        email:    u?.email || '',
+        initials: initials(u?.full_name),
+        amount:   `$${parseFloat(p.amount || 0).toFixed(2)}`,
+        status:   p.status || 'pending',
+        period:   new Date(p.requested_at).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }),
+        sessions: p.session_count || 0,
+      };
+    }));
   } catch (err) {
     logger.error({ err }, 'Admin payouts error');
     res.status(500).json({ error: 'Failed to load payouts' });
@@ -318,6 +341,92 @@ router.get('/requests', requireAdmin, async (req, res) => {
   } catch (err) {
     logger.error({ err }, 'Admin requests error');
     res.status(500).json({ error: 'Failed to load requests' });
+  }
+});
+
+// ── Settings ──────────────────────────────────────────────────────────────────
+const SETTINGS_FIELD_MAP = {
+  commissionRate: 'commission_rate',
+  sessionTimeoutMinutes: 'session_timeout_minutes',
+  requestTimeoutSeconds: 'request_timeout_seconds',
+  minTopUpAmount: 'min_top_up_amount',
+  maxSessionDurationMinutes: 'max_session_duration_minutes',
+  autoAssignEnabled: 'auto_assign_enabled',
+  emailNotificationsEnabled: 'email_notifications_enabled',
+  smsNotificationsEnabled: 'sms_notifications_enabled',
+  maintenanceMode: 'maintenance_mode',
+};
+
+function toCamelSettings(row) {
+  const out = {};
+  for (const [camel, snake] of Object.entries(SETTINGS_FIELD_MAP)) {
+    out[camel] = row[snake];
+  }
+  return out;
+}
+
+function toSnakeSettings(body) {
+  const out = {};
+  for (const [camel, snake] of Object.entries(SETTINGS_FIELD_MAP)) {
+    if (body[camel] !== undefined) out[snake] = body[camel];
+  }
+  return out;
+}
+
+router.get('/settings', requireAdmin, async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('platform_settings')
+      .select('*')
+      .eq('id', 1)
+      .single();
+    if (error && error.code !== 'PGRST116') throw error; // ignore "no rows found"
+
+    res.json(data ? toCamelSettings(data) : {
+      commissionRate: 10,
+      sessionTimeoutMinutes: 30,
+      requestTimeoutSeconds: 180,
+      minTopUpAmount: 5,
+      maxSessionDurationMinutes: 120,
+      autoAssignEnabled: false,
+      emailNotificationsEnabled: true,
+      smsNotificationsEnabled: false,
+      maintenanceMode: false,
+    });
+  } catch (err) {
+    logger.error({ err }, 'Admin settings fetch error');
+    res.status(500).json({ error: 'Failed to load settings' });
+  }
+});
+
+router.put('/settings', requireAdmin, async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('platform_settings')
+      .upsert({ id: 1, ...toSnakeSettings(req.body), updated_at: new Date().toISOString() })
+      .select()
+      .single();
+    if (error) throw error;
+    res.json(toCamelSettings(data));
+  } catch (err) {
+    logger.error({ err }, 'Admin settings update error');
+    res.status(500).json({ error: 'Failed to save settings' });
+  }
+});
+
+// ── Communications ────────────────────────────────────────────────────────────
+router.get('/communications', requireAdmin, async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('conversations')
+      .select('*, messages(content, created_at)')
+      .order('updated_at', { ascending: false })
+      .limit(50);
+    if (error) throw error;
+    res.json(data || []);
+  } catch (err) {
+    logger.error({ err }, 'Admin communications error');
+    res.json([]);
   }
 });
 
