@@ -1,3 +1,4 @@
+import adminRouter from './admin.mjs';
 import { Router } from 'express';
 import { supabaseAdmin, verifySupabaseToken } from '../config/supabase.mjs';
 import { getSessionsByUser } from '../db/sessionRepo.mjs';
@@ -815,5 +816,5 @@ router.get('/teams/me/export', requireAuth, async (req, res) => {
     res.status(500).json({ error: 'Failed to export' });
   }
 });
-
+router.use('/admin', adminRouter);
 export default router;
