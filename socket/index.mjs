@@ -1,3 +1,4 @@
+import { registerAdminHandlers } from './handlers/adminHandler.mjs';
 import { Server } from 'socket.io';
 import { authSocketMiddleware } from '../middleware/authSocket.mjs';
 import { requestHandler as registerHandler }  from './handlers/registerHandler.mjs';
@@ -60,6 +61,7 @@ export async function createSocketServer(httpServer) {
 
   // ── Connection ────────────────────────────────────────────
   io.on('connection', (socket) => {
+    registerAdminHandlers(io, socket);
     const role = socket.role; // set by authSocketMiddleware
     logger.info({ socketId: socket.id, userId: socket.userId, role }, 'Socket connected');
 
