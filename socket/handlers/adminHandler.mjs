@@ -1,8 +1,8 @@
 // socket/handlers/adminHandler.mjs
 // Handles all admin dashboard socket events
 
-import { supabaseAdmin } from '../config/supabase.mjs';
-import { logger } from '../config/logger.mjs';
+import { supabaseAdmin } from '../../config/supabase.mjs';
+import { logger } from '../../config/logger.mjs';
 import { getPendingRooms } from '../runtime/sessionRuntime.mjs';
 
 async function getPlatformStats() {
