@@ -122,7 +122,13 @@ router.get('/sessions', requireAdmin, async (req, res) => {
     res.json((data || []).map(s => {
       const started = s.started_at ? new Date(s.started_at) : null;
       const elapsedMins = started ? Math.floor((Date.now() - started.getTime()) / 60000) : 0;
-      const rawStatus = s.status === 'active' ? 'live' : s.status === 'completed' ? 'completed' : s.status || 'completed';
+      const STATUS_MAP = {
+  active: 'live', in_progress: 'live',
+  on_hold: 'hold', hold: 'hold',
+  escalated: 'escalated', flagged: 'escalated',
+  completed: 'completed', ended: 'completed',
+}
+const rawStatus = STATUS_MAP[s.status] ?? 'live'
 
       return {
         id:                  s.id,
