@@ -50,6 +50,7 @@ app.use((req, _res, next) => {
 
 // ── SECURITY ─────────────────────────────────────────────────
 app.use(helmet());
+app.get('/health', (req, res) => res.status(200).json({ status: 'ok' }));
 app.set('trust proxy', 1);
 
 // FIX: CORS — allow all origins in development, strict in production
