@@ -20,6 +20,7 @@ import { randomUUID } from 'crypto';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
+import { generalLimiter, strictLimiter, webhookLimiter } from './middleware/rateLimiter.mjs';
 
 import { logger } from './config/logger.mjs';
 import { connectRedis } from './config/redis.mjs';
@@ -60,7 +61,7 @@ app.use(cors({
     // In development, allow all
     if (isDev) return cb(null, true);
     // In production, check against whitelist
-  if (ALLOWED_ORIGINS.includes(origin) || origin.endsWith('.vercel.app')) return cb(null, true);
+  if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
     logger.warn({ origin, allowed: ALLOWED_ORIGINS }, 'CORS blocked');
     cb(new Error('Not allowed by CORS'));
   },
@@ -68,8 +69,8 @@ app.use(cors({
   credentials: true,
 }));
 
-// FIX: Removed express-rate-limit (not in package.json) — add back after npm install
-// app.use(rateLimit({...}));
+// Global rate limiter — 200 req/min per IP (defence-in-depth on top of per-route limits)
+app.use(generalLimiter);
 
 // ── BODY PARSERS ─────────────────────────────────────────────
 app.use('/webhook', (req, res, next) => {
@@ -108,9 +109,9 @@ app.get('/health', async (req, res, next) => {
   req.url = '/';
   healthRouter(req, res, next);
 });
-app.use('/webhook/lemonsqueezy', webhookRouter);
-app.use('/create-checkout',      checkoutRouter);
-app.use('/agora',                agoraRouter);
+app.use('/webhook/lemonsqueezy', webhookLimiter, webhookRouter);
+app.use('/create-checkout',      strictLimiter, checkoutRouter);
+app.use('/agora',                strictLimiter, agoraRouter);
 app.use('/v1',                   v1Router);
 
 // 404 handler

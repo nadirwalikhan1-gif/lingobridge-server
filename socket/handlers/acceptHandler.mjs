@@ -2,7 +2,7 @@ import { validateEvent } from '../../middleware/validateEvent.mjs';
 import { rateLimitSocket } from '../../middleware/rateLimiter.mjs';
 import { getRoom, updateRoom, deleteRoom } from '../runtime/sessionRuntime.mjs';
 import { activateSession, updateSessionStatus } from '../../db/sessionRepo.mjs';
-import { releaseReservation, getWalletByUserId } from '../../db/walletRepo.mjs';
+import { releaseReservation } from '../../db/walletRepo.mjs';
 import { supabaseAdmin } from '../../config/supabase.mjs';
 import { generateAgoraToken } from '../../services/agoraService.mjs';
 import { eventBus, EVENTS } from '../../utils/eventBus.mjs';
@@ -38,21 +38,14 @@ export function acceptHandler(io, socket) {
     }
 
     try {
-      // FIX: vault-model — ensure interpreter has an earnings vault before accepting
-      try {
-        await getWalletByUserId(interpreterId, 'interpreter');
-      } catch (e) {
-        await supabaseAdmin
-          .from('wallets')
-          .insert({
-            user_id: interpreterId,
-            vault_type: 'interpreter',
-            balance: 0,
-            currency: 'USD',
-            reserved_balance: 0,
-          });
-        logger.info({ interpreterId }, 'Created interpreter vault on accept');
-      }
+      // Ensure interpreter has an earnings vault — upsert avoids race condition
+      // when two concurrent accept events fire for the same interpreter.
+      await supabaseAdmin
+        .from('wallets')
+        .upsert(
+          { user_id: interpreterId, vault_type: 'interpreter', balance: 0, currency: 'USD', reserved_balance: 0 },
+          { onConflict: 'user_id,vault_type', ignoreDuplicates: true }
+        );
 
       await activateSession(room.sessionId, interpreterId);
       updateRoom(roomId, { interpreterSocketId: socket.id, interpreterUserId: interpreterId });

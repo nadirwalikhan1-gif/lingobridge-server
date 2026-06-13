@@ -11,7 +11,7 @@ async function requireAdmin(req, res, next) {
   const token = auth.slice(7);
   const user = await verifySupabaseToken(token);
   if (!user) return res.status(401).json({ error: 'Invalid token' });
-  if (user.user_metadata?.role !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+  if (user.app_metadata?.role !== 'admin') return res.status(403).json({ error: 'Admin access required' });
   req.user = user;
   next();
 }
@@ -75,6 +75,19 @@ router.post('/users/:id/approve', requireAdmin, async (req, res) => {
 router.post('/users/invite', requireAdmin, async (req, res) => {
   try {
     const { email, role = 'interpreter' } = req.body;
+
+    // Validate email format
+    if (!email || typeof email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ error: 'Valid email address is required' });
+    }
+
+    // Whitelist allowed roles — prevents admin from accidentally assigning 'admin'
+    // via this invite flow; admin role assignment requires direct DB access.
+    const ALLOWED_INVITE_ROLES = ['interpreter', 'client'];
+    if (!ALLOWED_INVITE_ROLES.includes(role)) {
+      return res.status(400).json({ error: `role must be one of: ${ALLOWED_INVITE_ROLES.join(', ')}` });
+    }
+
     await supabaseAdmin.auth.admin.inviteUserByEmail(email, { data: { role } });
     res.json({ success: true });
   } catch (err) {

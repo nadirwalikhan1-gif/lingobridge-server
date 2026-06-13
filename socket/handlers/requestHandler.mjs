@@ -10,7 +10,7 @@ import { eventBus, EVENTS } from '../../utils/eventBus.mjs';
 import { logger } from '../../config/logger.mjs';
 
 // TEMP: set to true to disable wallet check for free call testing
-const FREE_CALL_TESTING = true;
+const FREE_CALL_TESTING = false;
 
 export function requestHandler(io, socket) {
   socket.on('request-call', async (data) => {

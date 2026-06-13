@@ -28,28 +28,25 @@ export async function authSocketMiddleware(socket, next) {
     socket.userId = user.id;
     socket.user   = user;
 
+    // Role is read ONLY from server-authoritative metadata.
+    // Never from client-supplied handshake data to prevent privilege escalation.
     socket.role =
       user.app_metadata?.role ||
       user.user_metadata?.role ||
-      socket.handshake.auth?.role ||
       'client';
 
-    // FIX: vault-model — ensure user has appropriate vault wallet on connect
+    // Ensure user has appropriate vault wallet on connect.
+    // Uses upsert with ignoreDuplicates to avoid race condition when two
+    // socket connections authenticate simultaneously for the same user.
     const vaultType = socket.role === 'interpreter' ? 'interpreter' : 'client';
-    try {
-      await getWalletByUserId(user.id, vaultType);
-    } catch (e) {
-      // Wallet doesn't exist — create it
-      await supabaseAdmin
-        .from('wallets')
-        .insert({
-          user_id: user.id,
-          vault_type: vaultType,
-          balance: 0,
-          currency: 'USD',
-          reserved_balance: 0,
-        });
-      logger.info({ userId: user.id, vaultType }, 'Created vault wallet on socket auth');
+    const { error: walletErr } = await supabaseAdmin
+      .from('wallets')
+      .upsert(
+        { user_id: user.id, vault_type: vaultType, balance: 0, currency: 'USD', reserved_balance: 0 },
+        { onConflict: 'user_id,vault_type', ignoreDuplicates: true }
+      );
+    if (walletErr) {
+      logger.warn({ userId: user.id, vaultType, err: walletErr }, 'Wallet upsert warning');
     }
 
     logger.info({ socketId: socket.id, userId: user.id, role: socket.role }, 'Socket authenticated');

@@ -14,6 +14,22 @@ router.post('/', requireAuth, async (req, res) => {
   const { amount, currency = 'USD' } = req.body;
   const userId = req.userId;
 
+  // Input validation — prevent garbage amounts reaching the payment provider
+  const VALID_AMOUNTS   = [10, 25, 50, 100];
+  const VALID_CURRENCIES = ['USD', 'GBP', 'CAD'];
+
+  if (!VALID_AMOUNTS.includes(Number(amount))) {
+    return res.status(400).json({
+      error: `Invalid amount. Must be one of: ${VALID_AMOUNTS.join(', ')}`,
+    });
+  }
+
+  if (!VALID_CURRENCIES.includes(String(currency).toUpperCase())) {
+    return res.status(400).json({
+      error: `Invalid currency. Must be one of: ${VALID_CURRENCIES.join(', ')}`,
+    });
+  }
+
   try {
     const url = await createCheckout(userId, amount, currency);
     await audit(userId, AUDIT_ACTIONS.CHECKOUT_CREATED, { amount, currency });
