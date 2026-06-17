@@ -30,6 +30,69 @@ async function requireAuth(req, res, next) {
   next();
 }
 
+// ── GET /v1/dashboard ─────────────────────────────────────────────────────────
+// Single endpoint returning all client dashboard data in one round trip.
+// Replaces 5 separate calls: stats, recent sessions, upcoming, activity, wallet.
+router.get('/dashboard', requireAuth, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const startOfMonth = new Date();
+    startOfMonth.setDate(1);
+    startOfMonth.setHours(0, 0, 0, 0);
+    const startOfMonthISO = startOfMonth.toISOString();
+    const nowISO = new Date().toISOString();
+
+    const [
+      { count: totalSessions },
+      { count: monthSessions },
+      { count: favourites },
+      { data: txData },
+      walletResult,
+      recentSessions,
+      { data: upcomingSessions },
+      { data: activityData },
+    ] = await Promise.all([
+      supabaseAdmin.from('sessions').select('*', { count: 'exact', head: true }).eq('client_id', userId),
+      supabaseAdmin.from('sessions').select('*', { count: 'exact', head: true }).eq('client_id', userId).gte('created_at', startOfMonthISO),
+      supabaseAdmin.from('favorites').select('*', { count: 'exact', head: true }).eq('client_id', userId),
+      supabaseAdmin.from('transactions').select('amount').eq('user_id', userId).eq('type', 'debit').gte('created_at', startOfMonthISO),
+      getAvailableBalance(userId, 'client').catch(() => ({ availableBalance: 0, reservedBalance: 0, balance: 0, currency: 'USD' })),
+      getSessionsByUser(userId, 5, 0).catch(() => []),
+      supabaseAdmin.from('sessions').select('*').eq('client_id', userId).eq('status', 'scheduled').gte('scheduled_at', nowISO).order('scheduled_at', { ascending: true }).limit(5),
+      supabaseAdmin.from('transactions').select('*').eq('user_id', userId).order('created_at', { ascending: false }).limit(10),
+    ]);
+
+    const monthDebits = (txData || []).reduce((sum, t) => sum + Math.abs(t.amount), 0);
+
+    res.json({
+      stats: {
+        totalSessions: totalSessions || 0,
+        monthSessions: monthSessions || 0,
+        favourites: favourites || 0,
+        walletBalance: walletResult?.availableBalance ?? 0,
+        monthDebits,
+        sessionsTrend: `${monthSessions || 0} this month`,
+        favouritesTrend: '+0 new',
+      },
+      sessions: recentSessions || [],
+      upcoming: upcomingSessions || [],
+      activities: activityData || [],
+      wallet: {
+        available: walletResult?.availableBalance ?? 0,
+        reserved: walletResult?.reservedBalance ?? 0,
+        balance: walletResult?.balance ?? 0,
+        currency: walletResult?.currency ?? 'USD',
+        spentToday: 0,
+        spentWeek: 0,
+        spentMonth: monthDebits,
+      },
+    });
+  } catch (err) {
+    logger.error({ err }, 'Dashboard combined error');
+    res.status(500).json({ error: 'Failed to load dashboard' });
+  }
+});
+
 // ── GET /v1/dashboard/stats ────────────────────────────────────────────────────
 router.get('/dashboard/stats', requireAuth, async (req, res) => {
   try {
