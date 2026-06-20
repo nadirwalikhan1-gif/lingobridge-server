@@ -1,5 +1,5 @@
 import { logger } from '../../config/logger.mjs';
-import { setInterpreterAvailability } from '../../db/interpreterRepo.mjs';
+import { setInterpreterAvailability, setInterpreterStatus } from '../../db/interpreterRepo.mjs';
 import { getWalletByUserId } from '../../db/walletRepo.mjs';           // FIX: vault-model
 import { supabaseAdmin } from '../../config/supabase.mjs';             // FIX: vault-model
 import { getPendingRooms } from '../runtime/sessionRuntime.mjs';
@@ -108,5 +108,25 @@ export function requestHandler(io, socket) {
     }
 
     logger.info({ socketId: socket.id, userId: socket.userId }, 'Interpreter came back online');
+  });
+
+  // ── GO ON BREAK ───────────────────────────────────────────────
+  // Added to back the dashboard's three-state availability toggle
+  // (Online / Break / Offline). Leaves the 'interpreters' room same as
+  // offline (so no new requests are routed here), but persists a distinct
+  // 'break' status so the UI can show it differently from fully offline.
+  socket.on('go-on-break', async () => {
+    if (!socket.interpreterRole) return;
+
+    socket.leave('interpreters');
+
+    if (socket.userId) {
+      await setInterpreterStatus(socket.userId, 'break').catch((err) =>
+        logger.warn({ err, userId: socket.userId }, 'setInterpreterStatus(break) failed')
+      );
+    }
+
+    socket.emit('status-update', { status: 'break' });
+    logger.info({ socketId: socket.id, userId: socket.userId }, 'Interpreter went on break');
   });
 }

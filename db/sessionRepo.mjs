@@ -298,3 +298,39 @@ export async function getPendingSessions() {
   if (error) throw new Error(`Pending sessions fetch failed: ${error.message}`);
   return data || [];
 }
+
+/**
+ * Get session history for an interpreter (mirrors getSessionsByUser, but
+ * filtered by interpreter_id instead of client_id — added rather than
+ * modifying getSessionsByUser since that function is already used by the
+ * client-facing session history page).
+ */
+export async function getSessionsByInterpreter(interpreterId, limit = 20, offset = 0) {
+  const { data, error } = await supabaseAdmin
+    .from('sessions')
+    .select('*')
+    .eq('interpreter_id', interpreterId)
+    .order('created_at', { ascending: false })
+    .range(offset, offset + limit - 1);
+
+  if (error) throw new Error(`Interpreter session history failed: ${error.message}`);
+  return data || [];
+}
+
+/**
+ * Get completed session count + total minutes for an interpreter within a
+ * date range (used for dashboard stats and earnings chart bucketing).
+ */
+export async function getInterpreterSessionStats(interpreterId, sinceISO = null) {
+  let query = supabaseAdmin
+    .from('sessions')
+    .select('id, duration_minutes, session_type, language, status, ended_at, created_at')
+    .eq('interpreter_id', interpreterId)
+    .eq('status', 'completed');
+
+  if (sinceISO) query = query.gte('ended_at', sinceISO);
+
+  const { data, error } = await query;
+  if (error) throw new Error(`Interpreter session stats failed: ${error.message}`);
+  return data || [];
+}

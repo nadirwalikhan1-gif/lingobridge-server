@@ -111,3 +111,140 @@ export async function getInterpreterBalance(userId) {
     currency: data.currency,
   };
 }
+/**
+ * Get interpreter dashboard settings (notification prefs etc).
+ */
+export async function getInterpreterSettings(userId) {
+  const { data, error } = await supabaseAdmin
+    .from('interpreters')
+    .select('settings')
+    .eq('user_id', userId)
+    .single();
+
+  if (error || !data) throw new NotFoundError('Interpreter');
+  return data.settings;
+}
+
+/**
+ * Update interpreter dashboard settings. Merges into existing settings jsonb
+ * rather than overwriting, so a partial update can't wipe out other keys.
+ */
+export async function updateInterpreterSettings(userId, updates) {
+  const current = await getInterpreterSettings(userId);
+  const merged = { ...current, ...updates };
+
+  const { data, error } = await supabaseAdmin
+    .from('interpreters')
+    .update({ settings: merged })
+    .eq('user_id', userId)
+    .select('settings')
+    .single();
+
+  if (error) throw new Error(`Settings update failed: ${error.message}`);
+  return data.settings;
+}
+
+/**
+ * Update interpreter-owned profile fields (bio, languages). Name/email/avatar
+ * live on the `users` table and go through updateUser() in userRepo.mjs instead.
+ */
+export async function updateInterpreterProfile(userId, updates) {
+  const allowed = ['bio', 'languages'];
+  const sanitized = Object.fromEntries(
+    Object.entries(updates).filter(([k]) => allowed.includes(k))
+  );
+
+  if (Object.keys(sanitized).length === 0) {
+    return getInterpreterByUserId(userId);
+  }
+
+  const { error } = await supabaseAdmin
+    .from('interpreters')
+    .update(sanitized)
+    .eq('user_id', userId);
+
+  if (error) throw new Error(`Interpreter profile update failed: ${error.message}`);
+  return getInterpreterByUserId(userId);
+}
+
+/**
+ * Set the three-state interpreter status (online / break / offline).
+ * Keeps is_available in sync for backward compatibility with existing
+ * matching/request-routing logic, which only ever checks is_available —
+ * 'break' is treated as unavailable for matching purposes, same as offline,
+ * but tracked distinctly here for the dashboard's three-state UI.
+ */
+export async function setInterpreterStatus(userId, status) {
+  if (!['online', 'break', 'offline'].includes(status)) {
+    throw new Error(`Invalid interpreter status: ${status}`);
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from('interpreters')
+    .update({
+      status,
+      is_available: status === 'online',
+    })
+    .eq('user_id', userId)
+    .select('status, is_available')
+    .single();
+
+  if (error) throw new Error(`Status update failed: ${error.message}`);
+  return data;
+}
+
+/**
+ * Rating summary + trend for an interpreter (uses the interpreter_reviews
+ * view — see migrations/ — which already filters out self-ratings).
+ */
+export async function getInterpreterRatingSummary(userId) {
+  const interpreter = await getInterpreterByUserId(userId);
+
+  const { data, error } = await supabaseAdmin
+    .from('interpreter_reviews')
+    .select('rating, created_at')
+    .eq('interpreter_id', interpreter.id)
+    .order('created_at', { ascending: false });
+
+  if (error) throw new Error(`Rating summary failed: ${error.message}`);
+
+  const reviews = data || [];
+  const totalReviews = reviews.length;
+  const average = totalReviews > 0
+    ? reviews.reduce((sum, r) => sum + r.rating, 0) / totalReviews
+    : interpreter.rating;
+
+  // Trend: average of most recent 10 vs the 10 before that
+  const recent = reviews.slice(0, 10);
+  const previous = reviews.slice(10, 20);
+  const recentAvg = recent.length > 0
+    ? recent.reduce((s, r) => s + r.rating, 0) / recent.length
+    : null;
+  const previousAvg = previous.length > 0
+    ? previous.reduce((s, r) => s + r.rating, 0) / previous.length
+    : null;
+
+  return {
+    currentRating: interpreter.rating,
+    averageFromReviews: parseFloat(average.toFixed(2)),
+    totalReviews,
+    trend: (recentAvg !== null && previousAvg !== null) ? parseFloat((recentAvg - previousAvg).toFixed(2)) : null,
+  };
+}
+
+/**
+ * List reviews for an interpreter (paginated).
+ */
+export async function getInterpreterReviews(userId, limit = 20, offset = 0) {
+  const interpreter = await getInterpreterByUserId(userId);
+
+  const { data, error } = await supabaseAdmin
+    .from('interpreter_reviews')
+    .select('*')
+    .eq('interpreter_id', interpreter.id)
+    .order('created_at', { ascending: false })
+    .range(offset, offset + limit - 1);
+
+  if (error) throw new Error(`Reviews fetch failed: ${error.message}`);
+  return data || [];
+}

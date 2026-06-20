@@ -7,6 +7,7 @@ import { acceptHandler }    from './handlers/acceptHandler.mjs';
 import { endCallHandler }   from './handlers/endCallHandler.mjs';
 import { callInfoHandler } from './handlers/callInfoHandler.mjs';
 import { registerSessionHandlers } from './handlers/sessionHandlers.mjs'; // NEW
+import { interpreterDashboardHandler } from './handlers/interpreterDashboardHandler.mjs'; // NEW
 import { logger }           from '../config/logger.mjs';
 import { getRedisClient, isRedisAvailable } from '../config/redis.mjs';
 import { eventBus, EVENTS } from '../utils/eventBus.mjs';
@@ -98,6 +99,7 @@ export async function createSocketServer(httpServer) {
     endCallHandler(io, socket);
     callInfoHandler(io, socket);
     registerSessionHandlers(io, socket); // NEW
+    interpreterDashboardHandler(io, socket); // NEW
   });
 
   // ── Real-time wallet balance push ─────────────────────────
