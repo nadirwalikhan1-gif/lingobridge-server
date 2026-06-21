@@ -145,8 +145,8 @@ httpServer.headersTimeout = REQUEST_TIMEOUT;
 
 async function start() {
   await connectRedis();
-  await createSocketServer(httpServer);
-  startAllJobs();
+  const io = await createSocketServer(httpServer);
+  startAllJobs(io);
   registerShutdownHandlers(httpServer);
 
   httpServer.listen(PORT, () => {

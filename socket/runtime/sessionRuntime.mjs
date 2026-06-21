@@ -56,6 +56,16 @@ export function getPendingRooms() {
     .map(([roomId, room]) => ({ roomId, ...room.requestData }));
 }
 
+// Added for the request-timeout job — returns full room state (sessionId,
+// clientUserId, reservedAmount etc), not just requestData. getPendingRooms()
+// above is left untouched since it's already used by registerHandler.mjs,
+// adminHandler.mjs, and socket/index.mjs.
+export function getPendingRoomsFull() {
+  return [...rooms.entries()]
+    .filter(([, room]) => !room.interpreterSocketId)
+    .map(([roomId, room]) => ({ roomId, ...room }));
+}
+
 export function getRoomCount() {
   return rooms.size;
 }

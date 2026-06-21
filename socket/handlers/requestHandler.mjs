@@ -97,6 +97,7 @@ export function requestHandler(io, socket) {
         sessionId:      session.id,
         reservedAmount: reserve,
         channelName:    roomId,
+        createdAt:      Date.now(), // used by jobs/requestTimeouts.mjs
         requestData: {
           language,
           fromLang:       fromLang ?? language,
