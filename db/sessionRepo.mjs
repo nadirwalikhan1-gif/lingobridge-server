@@ -10,13 +10,14 @@ export async function createSession(data) {
     .insert({
       client_id:          data.clientId,
       language:           data.language,
+      from_language:      data.fromLanguage || data.language,
+      to_language:        data.toLanguage   || null,
       purpose:            data.purpose,
       session_type:       data.sessionType,
       currency:           data.currency,
       agora_channel:      data.agoraChannel,
       booked_duration:    data.bookedDuration || (parseInt(data.duration) * 60) || 1800,
       status:             'pending',
-      // Hold state — initialised false, updated by socket hold-session events
       on_hold:            false,
       hold_started_at:    null,
       total_hold_seconds: 0,
@@ -276,13 +277,51 @@ export async function getStaleSessions(thresholdHours = 3) {
 export async function getSessionsByUser(userId, limit = 20, offset = 0) {
   const { data, error } = await supabaseAdmin
     .from('sessions')
-    .select('*')
+    .select(`
+      id, client_id, interpreter_id, language, from_language, to_language,
+      purpose, session_type, status, cost, duration_minutes, created_at,
+      ended_at, booked_duration,
+      interpreter:users!sessions_interpreter_id_fkey (
+        id, full_name, email
+      ),
+      rating:session_ratings (
+        interpreter_rating
+      )
+    `)
     .eq('client_id', userId)
     .order('created_at', { ascending: false })
     .range(offset, offset + limit - 1);
 
   if (error) throw new Error(`Session history failed: ${error.message}`);
-  return data || [];
+
+  // Map raw DB rows to the shape the frontend expects
+  return (data || []).map(s => {
+    const interpreterName = s.interpreter?.full_name || s.interpreter?.email?.split('@')[0] || null;
+    const initials = interpreterName
+      ? interpreterName.split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2)
+      : null;
+    const rating = Array.isArray(s.rating) && s.rating.length > 0
+      ? s.rating[0].interpreter_rating
+      : null;
+    const dateObj = s.ended_at ? new Date(s.ended_at) : new Date(s.created_at);
+    const date = dateObj.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+
+    return {
+      id:            s.id,
+      fromLang:      s.from_language || s.language || 'en-us',
+      toLang:        s.to_language   || null,
+      type:          s.session_type,
+      duration:      s.duration_minutes ?? 0,
+      date,
+      price:         s.cost != null ? parseFloat(s.cost) : 0,
+      status:        s.status,
+      interpreterId: s.interpreter_id,
+      interpreter:   interpreterName
+        ? { name: interpreterName, initials }
+        : null,
+      rating,
+    };
+  });
 }
 
 /**
