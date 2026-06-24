@@ -40,13 +40,6 @@ router.get('/dashboard', requireAuth, async (req, res) => {
     startOfMonth.setDate(1);
     startOfMonth.setHours(0, 0, 0, 0);
     const startOfMonthISO = startOfMonth.toISOString();
-    const startOfWeek = new Date();
-    startOfWeek.setDate(startOfWeek.getDate() - startOfWeek.getDay());
-    startOfWeek.setHours(0, 0, 0, 0);
-    const startOfWeekISO = startOfWeek.toISOString();
-    const startOfToday = new Date();
-    startOfToday.setHours(0, 0, 0, 0);
-    const startOfTodayISO = startOfToday.toISOString();
     const nowISO = new Date().toISOString();
 
     const [
@@ -54,50 +47,24 @@ router.get('/dashboard', requireAuth, async (req, res) => {
       { count: monthSessions },
       { count: favourites },
       { data: txData },
-      { data: txWeek },
-      { data: txToday },
       walletResult,
       recentSessions,
       { data: upcomingSessions },
       { data: activityData },
-      { data: profileData },
     ] = await Promise.all([
       supabaseAdmin.from('sessions').select('*', { count: 'exact', head: true }).eq('client_id', userId),
       supabaseAdmin.from('sessions').select('*', { count: 'exact', head: true }).eq('client_id', userId).gte('created_at', startOfMonthISO),
       supabaseAdmin.from('favorites').select('*', { count: 'exact', head: true }).eq('client_id', userId),
       supabaseAdmin.from('transactions').select('amount').eq('user_id', userId).eq('type', 'debit').gte('created_at', startOfMonthISO),
-      supabaseAdmin.from('transactions').select('amount').eq('user_id', userId).eq('type', 'debit').gte('created_at', startOfWeekISO),
-      supabaseAdmin.from('transactions').select('amount').eq('user_id', userId).eq('type', 'debit').gte('created_at', startOfTodayISO),
       getAvailableBalance(userId, 'client').catch(() => ({ availableBalance: 0, reservedBalance: 0, balance: 0, currency: 'USD' })),
       getSessionsByUser(userId, 5, 0).catch(() => []),
       supabaseAdmin.from('sessions').select('*').eq('client_id', userId).eq('status', 'scheduled').gte('scheduled_at', nowISO).order('scheduled_at', { ascending: true }).limit(5),
-      supabaseAdmin.from('transactions').select('id, type, amount, description, created_at').eq('user_id', userId).order('created_at', { ascending: false }).limit(10),
-      supabaseAdmin.from('users').select('full_name, email, avatar_url').eq('id', userId).single(),
+      supabaseAdmin.from('transactions').select('*').eq('user_id', userId).order('created_at', { ascending: false }).limit(10),
     ]);
 
-    const monthDebits = (txData || []).reduce((sum, t) => sum + Math.abs(parseFloat(t.amount || 0)), 0);
-    const weekDebits  = (txWeek  || []).reduce((sum, t) => sum + Math.abs(parseFloat(t.amount || 0)), 0);
-    const todayDebits = (txToday || []).reduce((sum, t) => sum + Math.abs(parseFloat(t.amount || 0)), 0);
-
-    // Transform raw transaction rows into the shape the activity feed expects
-    const activities = (activityData || []).map(t => {
-      const date = new Date(t.created_at);
-      const time = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) +
-                   ' · ' + date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-      const amount = parseFloat(t.amount || 0);
-      let type = 'wallet';
-      let text = t.description || 'Transaction';
-      if (t.type === 'debit')  { type = 'session'; text = t.description || `Session charge — $${Math.abs(amount).toFixed(2)}`; }
-      if (t.type === 'credit') { type = 'wallet';  text = t.description || `Funds added — $${amount.toFixed(2)}`; }
-      return { id: t.id, type, text, time, link: '/wallet' };
-    });
+    const monthDebits = (txData || []).reduce((sum, t) => sum + Math.abs(t.amount), 0);
 
     res.json({
-      profile: {
-        fullName:  profileData?.full_name  || null,
-        email:     profileData?.email      || req.user.email,
-        avatarUrl: profileData?.avatar_url || null,
-      },
       stats: {
         totalSessions: totalSessions || 0,
         monthSessions: monthSessions || 0,
@@ -109,15 +76,15 @@ router.get('/dashboard', requireAuth, async (req, res) => {
       },
       sessions: recentSessions || [],
       upcoming: upcomingSessions || [],
-      activities,
+      activities: activityData || [],
       wallet: {
-        available:   walletResult?.availableBalance ?? 0,
-        reserved:    walletResult?.reservedBalance  ?? 0,
-        balance:     walletResult?.balance          ?? 0,
-        currency:    walletResult?.currency         ?? 'USD',
-        spentToday:  todayDebits,
-        spentWeek:   weekDebits,
-        spentMonth:  monthDebits,
+        available: walletResult?.availableBalance ?? 0,
+        reserved: walletResult?.reservedBalance ?? 0,
+        balance: walletResult?.balance ?? 0,
+        currency: walletResult?.currency ?? 'USD',
+        spentToday: 0,
+        spentWeek: 0,
+        spentMonth: monthDebits,
       },
     });
   } catch (err) {

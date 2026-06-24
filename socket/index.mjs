@@ -119,6 +119,19 @@ export async function createSocketServer(httpServer) {
     logger.info({ userId, balance, pushed }, 'Wallet balance pushed to connected socket(s)');
   });
 
+  // ── Admin notification on genuine wallet top-up ───────────────
+  // Distinct from WALLET_CREDITED above, which also fires on reservation
+  // releases — this only fires for actual completed payments.
+  eventBus.on(EVENTS.WALLET_TOPPED_UP, ({ userId, userName, amount, currency }) => {
+    io.to('admins').emit('wallet-topped-up', {
+      id:       `topup-${userId}-${Date.now()}`,
+      severity: 'info',
+      title:    'Wallet top-up',
+      detail:   `${userName} added ${currency} ${amount}`,
+      time:     new Date().toISOString(),
+    });
+  });
+
   // NEW: Start vault-model billing loops
   setInterval(billingTick, 60_000);
   setInterval(holdBillingTick, 60_000);

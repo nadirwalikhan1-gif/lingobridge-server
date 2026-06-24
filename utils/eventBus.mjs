@@ -14,4 +14,5 @@ export const EVENTS = {
   BALANCE_EXHAUSTED:      'session.balance_exhausted',
   WALLET_CREDITED:        'wallet.credited',
   RESERVATION_RELEASED:   'wallet.reservation_released',
+  WALLET_TOPPED_UP:       'wallet.topped_up', // NEW — specifically real completed payments, distinct from WALLET_CREDITED (also fires on reservation releases)
 };

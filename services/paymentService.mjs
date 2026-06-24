@@ -41,7 +41,10 @@ export async function createCheckout(userId, amount, currency = 'USD') {
 
   return data?.data?.attributes?.url;
 }import crypto from 'crypto';
-import { creditWallet } from '../db/walletRepo.mjs';
+import { addBalance } from './walletService.mjs';
+import { claimWebhookEvent, releaseWebhookEventClaim } from '../db/webhookEventRepo.mjs';
+import { eventBus, EVENTS } from '../utils/eventBus.mjs';
+import { getUserById } from '../db/userRepo.mjs';
 
 /**
  * Verify LemonSqueezy webhook signature
@@ -57,7 +60,17 @@ export function verifyWebhookSignature(rawBody, signature) {
 }
 
 /**
- * Process order_created webhook — credit user wallet
+ * Process order_created webhook — credit user wallet.
+ *
+ * FIX: previously called the raw creditWallet(userId, amount, currency, orderId)
+ * from db/walletRepo.mjs — wrong signature (currency landed in the vaultType
+ * slot), and it skipped transaction logging, audit logging, and the
+ * WALLET_CREDITED event entirely. Now uses services/walletService.mjs's
+ * addBalance(), which does all of that correctly in one call.
+ *
+ * FIX: also adds real idempotency. LemonSqueezy retries on any non-2xx
+ * response (by design, per this file's webhook.mjs caller) — without a
+ * claim guard, a retried event could credit the same payment twice.
  */
 export async function processOrderCreated(payload) {
   const custom   = payload?.meta?.custom_data;
@@ -65,11 +78,37 @@ export async function processOrderCreated(payload) {
   const amount   = parseFloat(custom?.amount);
   const currency = custom?.currency ?? 'USD';
   const orderId  = payload?.data?.id;
+  const eventId  = payload?.meta?.event_id ?? orderId;
 
   if (!userId || isNaN(amount)) {
     throw new Error('Missing user_id or amount in webhook payload');
   }
 
-  await creditWallet(userId, amount, currency, orderId);
-  return { success: true };
+  const claimed = await claimWebhookEvent(eventId, payload?.meta?.event_name);
+  if (!claimed) {
+    logger.info({ eventId, userId }, 'Webhook event already processed — skipping duplicate');
+    return { duplicate: true };
+  }
+
+  try {
+    // This webhook only ever handles client wallet top-ups.
+    await addBalance(userId, amount, currency, `Top-up — order ${orderId}`, 'client');
+
+    const user = await getUserById(userId).catch(() => null);
+    eventBus.emit(EVENTS.WALLET_TOPPED_UP, {
+      userId,
+      userName: user?.full_name ?? user?.email ?? userId,
+      amount,
+      currency,
+    });
+
+    return { success: true };
+  } catch (err) {
+    // Release the claim so a legitimate retry (this failure was transient,
+    // not a duplicate) isn't permanently blocked from ever crediting.
+    await releaseWebhookEventClaim(eventId).catch((cleanupErr) =>
+      logger.error({ cleanupErr, eventId }, 'Failed to release webhook claim after credit failure')
+    );
+    throw err;
+  }
 }

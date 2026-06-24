@@ -75,14 +75,12 @@ export function requestHandler(io, socket) {
       const session = await createSession({
         clientId:       userId,
         language:       fromLang ?? language,
-        fromLanguage:   fromLang ?? language,
-        toLanguage:     toLang ?? null,
         purpose:        category ?? 'general',
         sessionType,
         currency:       wallet.currency ?? 'USD',
         agoraChannel:   roomId,
-        bookedDuration,
-        duration,
+        bookedDuration, // FIX: vault-model
+        duration,       // FIX: pass raw duration string too
       });
 
       let agoraToken = null;

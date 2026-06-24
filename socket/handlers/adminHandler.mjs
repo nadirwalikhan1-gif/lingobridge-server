@@ -109,7 +109,11 @@ async function getPayoutQueue() {
 }
 
 async function getAlerts() {
-  // Return recent disputes and stale sessions as alerts
+  // Return recent disputes and stale sessions as alerts.
+  // FIX: widget (OperationalAlerts.jsx) expects {severity, title, detail, time}
+  // — this previously returned {type, message, time}, which crashed the
+  // widget (cfg.border on undefined cfg) the moment a real dispute existed.
+  // Looked fine with zero open disputes, which is why it went unnoticed.
   const { data: disputes } = await supabaseAdmin
     .from('disputes')
     .select('id, reason, created_at')
@@ -118,10 +122,11 @@ async function getAlerts() {
     .limit(5);
 
   return (disputes || []).map(d => ({
-    id:      d.id,
-    type:    'dispute',
-    message: `Open dispute: ${d.reason ?? 'No reason given'}`,
-    time:    d.created_at,
+    id:       d.id,
+    severity: 'warn',
+    title:    'Open dispute',
+    detail:   d.reason ?? 'No reason given',
+    time:     d.created_at,
   }));
 }
 
