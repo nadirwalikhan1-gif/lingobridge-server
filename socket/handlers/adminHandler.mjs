@@ -4,6 +4,7 @@
 import { supabaseAdmin } from '../../config/supabase.mjs';
 import { logger } from '../../config/logger.mjs';
 import { getPendingRooms } from '../runtime/sessionRuntime.mjs';
+import { eventBus, EVENTS } from '../../utils/eventBus.mjs';
 
 async function getPlatformStats() {
   const [activeSessions, interpretersOnline, openDisputes] = await Promise.all([
@@ -29,13 +30,13 @@ async function getLiveSessions() {
 
   if (error) { logger.error({ error }, 'getLiveSessions failed'); return []; }
   return (data || []).map(s => ({
-    id:          s.id,
-    channel:     s.agora_channel,
-    language:    s.language,
-    type:        s.session_type,
-    startedAt:   s.started_at,
-    clientName:  s.users?.full_name ?? 'Unknown',
-    clientId:    s.client_id,
+    id:            s.id,
+    channel:       s.agora_channel,
+    language:      s.language,
+    type:          s.session_type,
+    startedAt:     s.started_at,
+    clientName:    s.users?.full_name ?? 'Unknown',
+    clientId:      s.client_id,
     interpreterId: s.interpreter_id,
   }));
 }
@@ -99,21 +100,16 @@ async function getPayoutQueue() {
 
   if (error) { logger.error({ error }, 'getPayoutQueue failed'); return []; }
   return (data || []).map(p => ({
-    id:             p.id,
-    interpreterId:  p.interpreter_id,
+    id:              p.id,
+    interpreterId:   p.interpreter_id,
     interpreterName: p.users?.full_name ?? 'Unknown',
-    amount:         p.amount,
-    currency:       p.currency,
-    requestedAt:    p.requested_at,
+    amount:          p.amount,
+    currency:        p.currency,
+    requestedAt:     p.requested_at,
   }));
 }
 
 async function getAlerts() {
-  // Return recent disputes and stale sessions as alerts.
-  // FIX: widget (OperationalAlerts.jsx) expects {severity, title, detail, time}
-  // — this previously returned {type, message, time}, which crashed the
-  // widget (cfg.border on undefined cfg) the moment a real dispute existed.
-  // Looked fine with zero open disputes, which is why it went unnoticed.
   const { data: disputes } = await supabaseAdmin
     .from('disputes')
     .select('id, reason, created_at')
@@ -137,8 +133,8 @@ async function getSystemHealth() {
     .eq('status', 'active');
 
   return [
-    { label: 'Database',    status: 'ok' },
-    { label: 'Socket',      status: 'ok' },
+    { label: 'Database',     status: 'ok' },
+    { label: 'Socket',       status: 'ok' },
     { label: 'Active calls', status: 'ok', value: sessions?.count ?? 0 },
   ];
 }
@@ -165,15 +161,15 @@ async function getSnapshot() {
 export function registerAdminHandlers(io, socket) {
   if (socket.role !== 'admin') return;
 
-  socket.on('get-platform-stats',      async () => { try { socket.emit('platform-stats',      await getPlatformStats());      } catch (e) { logger.error(e, 'platform-stats error'); } });
-  socket.on('get-live-sessions',       async () => { try { socket.emit('live-sessions',       await getLiveSessions());       } catch (e) { logger.error(e, 'live-sessions error'); } });
-  socket.on('get-request-queue',       async () => { try { socket.emit('request-queue',       await getRequestQueue());       } catch (e) { logger.error(e, 'request-queue error'); } });
-  socket.on('get-interpreter-presence',async () => { try { socket.emit('interpreter-presence',await getInterpreterPresence());} catch (e) { logger.error(e, 'interpreter-presence error'); } });
-  socket.on('get-active-disputes',     async () => { try { socket.emit('active-disputes',     await getActiveDisputes());     } catch (e) { logger.error(e, 'active-disputes error'); } });
-  socket.on('get-payout-queue',        async () => { try { socket.emit('payout-queue',        await getPayoutQueue());        } catch (e) { logger.error(e, 'payout-queue error'); } });
-  socket.on('get-alerts',              async () => { try { socket.emit('operational-alerts',  await getAlerts());             } catch (e) { logger.error(e, 'alerts error'); } });
-  socket.on('get-system-health',       async () => { try { socket.emit('system-health',       await getSystemHealth());       } catch (e) { logger.error(e, 'system-health error'); } });
-  socket.on('get-snapshot',            async () => { try { socket.emit('snapshot',            await getSnapshot());           } catch (e) { logger.error(e, 'snapshot error'); } });
+  socket.on('get-platform-stats',       async () => { try { socket.emit('platform-stats',       await getPlatformStats());       } catch (e) { logger.error(e, 'platform-stats error'); } });
+  socket.on('get-live-sessions',        async () => { try { socket.emit('live-sessions',        await getLiveSessions());        } catch (e) { logger.error(e, 'live-sessions error'); } });
+  socket.on('get-request-queue',        async () => { try { socket.emit('request-queue',        await getRequestQueue());        } catch (e) { logger.error(e, 'request-queue error'); } });
+  socket.on('get-interpreter-presence', async () => { try { socket.emit('interpreter-presence', await getInterpreterPresence()); } catch (e) { logger.error(e, 'interpreter-presence error'); } });
+  socket.on('get-active-disputes',      async () => { try { socket.emit('active-disputes',      await getActiveDisputes());      } catch (e) { logger.error(e, 'active-disputes error'); } });
+  socket.on('get-payout-queue',         async () => { try { socket.emit('payout-queue',         await getPayoutQueue());         } catch (e) { logger.error(e, 'payout-queue error'); } });
+  socket.on('get-alerts',               async () => { try { socket.emit('operational-alerts',   await getAlerts());              } catch (e) { logger.error(e, 'alerts error'); } });
+  socket.on('get-system-health',        async () => { try { socket.emit('system-health',        await getSystemHealth());        } catch (e) { logger.error(e, 'system-health error'); } });
+  socket.on('get-snapshot',             async () => { try { socket.emit('snapshot',             await getSnapshot());            } catch (e) { logger.error(e, 'snapshot error'); } });
 
   socket.on('admin-resolve-dispute', async ({ disputeId }) => {
     try {
@@ -194,6 +190,24 @@ export function registerAdminHandlers(io, socket) {
       await supabaseAdmin.from('payout_requests').update({ status: 'approved' }).eq('id', payoutId);
       io.to('admins').emit('payout-approved', { id: payoutId });
     } catch (e) { logger.error(e, 'approve-payout error'); }
+  });
+
+  // ── Real-time top-up push ─────────────────────────────────────
+  const onTopUp = (data) => {
+    io.to('admins').emit('wallet-topped-up', {
+      userId:   data.userId,
+      userName: data.userName,
+      amount:   data.amount,
+      currency: data.currency,
+      time:     new Date().toISOString(),
+    });
+  };
+  eventBus.on(EVENTS.WALLET_TOPPED_UP, onTopUp);
+
+  // Clean up when this admin socket disconnects — prevents listener
+  // accumulation and duplicate pushes on reconnect
+  socket.on('disconnect', () => {
+    eventBus.off(EVENTS.WALLET_TOPPED_UP, onTopUp);
   });
 
   logger.info({ userId: socket.userId }, 'Admin handlers registered');
