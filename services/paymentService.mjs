@@ -11,13 +11,14 @@ lemonSqueezySetup({ apiKey: process.env.LEMONSQUEEZY_API_KEY });
  * @param {string} currency
  */
 export async function createCheckout(userId, amount, currency = 'USD') {
-  if (!TOPUP_AMOUNTS.includes(amount)) {
-    throw new Error(`Invalid top-up amount: ${amount}. Allowed: ${TOPUP_AMOUNTS.join(', ')}`);
+  const validAmounts = TOPUP_AMOUNTS[currency] ?? TOPUP_AMOUNTS.USD;
+  if (!validAmounts.includes(amount)) {
+    throw new Error(`Invalid top-up amount: ${amount}. Allowed: ${validAmounts.join(', ')}`);
   }
 
-  const variantId = LEMON_VARIANTS.pro;
+  const variantId = LEMON_VARIANTS[currency]?.[amount];
   if (!variantId) {
-    throw new Error('LEMONSQUEEZY_VARIANT_ID_PRO is not configured');
+    throw new Error(`LemonSqueezy variant not configured for ${currency} $${amount}. Set LS_VARIANT_${currency}_${amount} in Railway.`);
   }
 
   const { data, error } = await lsCreateCheckout(
@@ -40,7 +41,8 @@ export async function createCheckout(userId, amount, currency = 'USD') {
   }
 
   return data?.data?.attributes?.url;
-}import crypto from 'crypto';
+}
+import crypto from 'crypto';
 import { addBalance } from './walletService.mjs';
 import { claimWebhookEvent, releaseWebhookEventClaim } from '../db/webhookEventRepo.mjs';
 import { eventBus, EVENTS } from '../utils/eventBus.mjs';
