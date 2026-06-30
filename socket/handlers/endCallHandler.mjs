@@ -1,5 +1,8 @@
+// socket/handlers/endCallHandler.mjs
+
 import { logger } from '../../config/logger.mjs';
 import { endSession } from '../../services/billingService.mjs';
+import { sendSessionReceipt } from '../../services/receiptService.mjs';
 import { setInterpreterAvailability } from '../../db/interpreterRepo.mjs';
 import { getRoom, deleteRoom, getRoomsForSocket } from '../runtime/sessionRuntime.mjs';
 import { rateLimitSocket } from '../../middleware/rateLimiter.mjs';
@@ -32,8 +35,8 @@ export function endCallHandler(io, socket) {
 
 /**
  * Shared end-room logic.
- * stopBilling removed — billing refactor uses global setInterval ticks;
- * there is no per-session billing tracker to stop.
+ * Closes the session, fires receipts to client and admin, then notifies
+ * both parties via socket. Receipt failure never blocks call-end.
  */
 async function _endRoom(io, socket, roomId, reason) {
   const room = getRoom(roomId);
@@ -44,10 +47,16 @@ async function _endRoom(io, socket, roomId, reason) {
   // Notify both parties
   io.to(roomId).emit('call-ended', { reason });
 
-  // Close session record in DB — per-minute billing already processed by ticks
+  // Close session record — per-minute billing already processed by ticks
   if (room.sessionId) {
     await endSession(room.sessionId).catch((err) =>
       logger.error({ err, roomId, sessionId: room.sessionId }, 'endSession failed')
+    );
+
+    // Send receipt to client (email or SMS fallback) and admin copy
+    // Fire-and-forget — receipt failure must never block the call-end flow
+    sendSessionReceipt(room.sessionId).catch((err) =>
+      logger.error({ err, sessionId: room.sessionId }, 'sendSessionReceipt unexpected error')
     );
   }
 
