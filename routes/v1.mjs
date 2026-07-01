@@ -4,6 +4,8 @@ import multer from 'multer';
 import { supabaseAdmin, verifySupabaseToken } from '../config/supabase.mjs';
 import { getSessionsByUser } from '../db/sessionRepo.mjs';
 import { getAvailableBalance } from '../db/walletRepo.mjs';
+import { createSupportTicket } from '../db/supportTicketRepo.mjs';
+import { sendEmail } from '../services/notificationService.mjs';
 import { logger } from '../config/logger.mjs';
 
 const router = Router();
@@ -1078,6 +1080,115 @@ router.put('/users/me/password', requireAuth, async (req, res) => {
   } catch (err) {
     logger.error({ err, userId: req.user.id }, 'Password change failed');
     res.status(500).json({ error: 'Failed to change password' });
+  }
+});
+
+// ── POST /v1/users/me/export ───────────────────────────────────────────────────
+// Immediate synchronous export — compiles the user's real data and returns
+// it directly so the frontend can download it as a JSON file right away.
+router.post('/users/me/export', requireAuth, async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const [{ data: profile }, { data: sessions }, { data: transactions }, { data: favourites }] = await Promise.all([
+      supabaseAdmin.from('users').select('full_name, email, phone, avatar_url, profile_extra, settings, created_at').eq('id', userId).single(),
+      supabaseAdmin.from('sessions').select('id, session_type, language, purpose, status, started_at, ended_at').eq('client_id', userId).order('started_at', { ascending: false }),
+      supabaseAdmin.from('transactions').select('id, type, amount, currency, created_at').eq('user_id', userId).order('created_at', { ascending: false }),
+      supabaseAdmin.from('favorites').select('interpreter_id, created_at').eq('client_id', userId),
+    ]);
+
+    const exportPayload = {
+      exportedAt:   new Date().toISOString(),
+      profile:      profile ?? null,
+      sessions:     sessions ?? [],
+      transactions: transactions ?? [],
+      favourites:   favourites ?? [],
+    };
+
+    logger.info({ userId }, 'Data export generated');
+    res.json(exportPayload);
+  } catch (err) {
+    logger.error({ err, userId: req.user.id }, 'Data export failed');
+    res.status(500).json({ error: 'Failed to export data' });
+  }
+});
+
+// ── POST /v1/users/me/delete-request ───────────────────────────────────────────
+// Does NOT delete anything immediately — creates a support ticket for admin
+// review, matching how account deletion is presented to the user ("request
+// submitted"). Actual deletion should always be a deliberate admin action,
+// never an automatic one, given financial/session history implications.
+router.post('/users/me/delete-request', requireAuth, async (req, res) => {
+  try {
+    const { reason } = req.body;
+
+    const ticket = await createSupportTicket({
+      userId:  req.user.id,
+      role:    'client',
+      subject: 'Account Deletion Request',
+      message: reason ? `Reason given: ${reason}` : 'No reason given',
+    });
+
+    const adminEmail = process.env.ADMIN_EMAIL;
+    if (adminEmail) {
+      await sendEmail(
+        adminEmail,
+        `Account deletion request — ${req.user.email}`,
+        `<p>User <strong>${req.user.email}</strong> (${req.user.id}) has requested account deletion.</p><p>Reason: ${reason || 'Not given'}</p><p>Ticket ID: ${ticket.id}</p>`
+      ).catch((err) => logger.error({ err }, 'Delete-request admin email failed'));
+    }
+
+    if (req.user.email) {
+      await sendEmail(
+        req.user.email,
+        'Your Andiraw account deletion request',
+        `<p>We've received your request to delete your Andiraw account. Our team will process this within a few business days and confirm once complete.</p><p>If you didn't request this, contact support immediately.</p>`
+      ).catch((err) => logger.error({ err }, 'Delete-request client email failed'));
+    }
+
+    logger.info({ userId: req.user.id, ticketId: ticket.id }, 'Account deletion requested');
+    res.json({ success: true, ticketId: ticket.id });
+  } catch (err) {
+    logger.error({ err, userId: req.user.id }, 'Delete request failed');
+    res.status(500).json({ error: 'Failed to submit deletion request' });
+  }
+});
+
+// ── POST /v1/users/me/baa-request ──────────────────────────────────────────────
+// Business Associate Agreement — a HIPAA compliance document healthcare
+// clients need signed before using the platform for medical interpretation.
+// Logged as a ticket for admin/legal follow-up, not auto-generated.
+router.post('/users/me/baa-request', requireAuth, async (req, res) => {
+  try {
+    const ticket = await createSupportTicket({
+      userId:  req.user.id,
+      role:    'client',
+      subject: 'BAA Request',
+      message: `User ${req.user.email} has requested a Business Associate Agreement.`,
+    });
+
+    const adminEmail = process.env.ADMIN_EMAIL;
+    if (adminEmail) {
+      await sendEmail(
+        adminEmail,
+        `BAA request — ${req.user.email}`,
+        `<p>User <strong>${req.user.email}</strong> (${req.user.id}) has requested a BAA.</p><p>Ticket ID: ${ticket.id}</p>`
+      ).catch((err) => logger.error({ err }, 'BAA-request admin email failed'));
+    }
+
+    if (req.user.email) {
+      await sendEmail(
+        req.user.email,
+        'Your Andiraw BAA request',
+        `<p>We've received your request for a Business Associate Agreement. Our team will follow up with the signed document shortly.</p>`
+      ).catch((err) => logger.error({ err }, 'BAA-request client email failed'));
+    }
+
+    logger.info({ userId: req.user.id, ticketId: ticket.id }, 'BAA requested');
+    res.json({ success: true, ticketId: ticket.id });
+  } catch (err) {
+    logger.error({ err, userId: req.user.id }, 'BAA request failed');
+    res.status(500).json({ error: 'Failed to submit BAA request' });
   }
 });
 
