@@ -1192,5 +1192,175 @@ router.post('/users/me/baa-request', requireAuth, async (req, res) => {
   }
 });
 
+// ── GET /v1/interpreters/search ────────────────────────────────────────────────
+// Name/language search used by Messages ("new conversation") and Favourites.
+// Separate from GET /interpreters (which filters by language/category/session
+// type for the booking flow) since this is a free-text name search.
+router.get('/interpreters/search', requireAuth, async (req, res) => {
+  try {
+    const { q, limit = 20 } = req.query;
+
+    let query = supabaseAdmin
+      .from('interpreter_profiles')
+      .select('*, users!interpreter_profiles_user_id_fkey(full_name, avatar_url)')
+      .eq('is_available', true);
+
+    const { data, error } = await query.limit(parseInt(limit) || 20);
+    if (error) throw error;
+
+    const filtered = q
+      ? (data || []).filter(i => (i.users?.full_name ?? '').toLowerCase().includes(q.toLowerCase()))
+      : (data || []);
+
+    const interpreters = filtered.map(i => ({
+      id:       i.user_id,
+      name:     i.users?.full_name ?? 'Unknown',
+      avatar:   i.users?.avatar_url ?? null,
+      languages: i.languages ?? [],
+    }));
+
+    res.json({ interpreters });
+  } catch (err) {
+    logger.error({ err }, 'Interpreter search failed');
+    res.json({ interpreters: [] });
+  }
+});
+
+// ── POST /v1/conversations ─────────────────────────────────────────────────────
+// Starts a new conversation, or returns the existing one if the client
+// already has a thread with this interpreter (idempotent — avoids duplicate
+// threads when clicking "Message" more than once).
+router.post('/conversations', requireAuth, async (req, res) => {
+  try {
+    const { interpreterId } = req.body;
+    if (!interpreterId) return res.status(400).json({ error: 'interpreterId is required' });
+
+    const { data: existing } = await supabaseAdmin
+      .from('conversations')
+      .select('*')
+      .eq('client_id', req.user.id)
+      .eq('interpreter_id', interpreterId)
+      .maybeSingle();
+
+    if (existing) return res.json(existing);
+
+    const { data, error } = await supabaseAdmin
+      .from('conversations')
+      .insert({ client_id: req.user.id, interpreter_id: interpreterId })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    logger.info({ userId: req.user.id, interpreterId, conversationId: data.id }, 'Conversation started');
+    res.json(data);
+  } catch (err) {
+    logger.error({ err, userId: req.user.id }, 'Start conversation failed');
+    res.status(500).json({ error: 'Failed to start conversation' });
+  }
+});
+
+// ── GET /v1/conversations/:id/messages ─────────────────────────────────────────
+router.get('/conversations/:id/messages', requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { before, limit = 50 } = req.query;
+
+    // Ownership check — client can only read their own conversation
+    const { data: convo } = await supabaseAdmin
+      .from('conversations')
+      .select('id, client_id')
+      .eq('id', id)
+      .single();
+
+    if (!convo || convo.client_id !== req.user.id) {
+      return res.status(403).json({ error: 'Not authorized to view this conversation' });
+    }
+
+    let query = supabaseAdmin
+      .from('messages')
+      .select('*')
+      .eq('conversation_id', id)
+      .order('created_at', { ascending: false })
+      .limit(parseInt(limit) || 50);
+
+    if (before) query = query.lt('created_at', before);
+
+    const { data, error } = await query;
+    if (error) throw error;
+
+    res.json({ messages: (data || []).reverse() });
+  } catch (err) {
+    logger.error({ err, conversationId: req.params.id }, 'Fetch messages failed');
+    res.status(500).json({ error: 'Failed to load messages' });
+  }
+});
+
+// ── POST /v1/conversations/:id/messages ────────────────────────────────────────
+router.post('/conversations/:id/messages', requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { text, attachments = [] } = req.body;
+
+    if (!text?.trim() && attachments.length === 0) {
+      return res.status(400).json({ error: 'Message cannot be empty' });
+    }
+
+    const { data: convo } = await supabaseAdmin
+      .from('conversations')
+      .select('id, client_id')
+      .eq('id', id)
+      .single();
+
+    if (!convo || convo.client_id !== req.user.id) {
+      return res.status(403).json({ error: 'Not authorized to message in this conversation' });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('messages')
+      .insert({
+        conversation_id: id,
+        sender_id:        req.user.id,
+        text:             text ?? '',
+        attachments,
+        read:             false,
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    await supabaseAdmin
+      .from('conversations')
+      .update({ updated_at: new Date().toISOString() })
+      .eq('id', id);
+
+    res.json(data);
+  } catch (err) {
+    logger.error({ err, conversationId: req.params.id }, 'Send message failed');
+    res.status(500).json({ error: 'Failed to send message' });
+  }
+});
+
+// ── POST /v1/conversations/:id/read ────────────────────────────────────────────
+router.post('/conversations/:id/read', requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { error } = await supabaseAdmin
+      .from('messages')
+      .update({ read: true })
+      .eq('conversation_id', id)
+      .neq('sender_id', req.user.id);
+
+    if (error) throw error;
+
+    res.json({ success: true });
+  } catch (err) {
+    logger.error({ err, conversationId: req.params.id }, 'Mark read failed');
+    res.status(500).json({ error: 'Failed to mark as read' });
+  }
+});
+
 router.use('/admin', adminRouter);
 export default router;
