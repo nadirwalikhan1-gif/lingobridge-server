@@ -860,5 +860,132 @@ router.get('/teams/me/export', requireAuth, async (req, res) => {
     res.status(500).json({ error: 'Failed to export' });
   }
 });
+// ── GET /v1/users/me/profile ───────────────────────────────────────────────────
+router.get('/users/me/profile', requireAuth, async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('users')
+      .select('full_name, email, phone, avatar_url, profile_extra')
+      .eq('id', req.user.id)
+      .single();
+
+    if (error) throw error;
+
+    const [firstName = '', lastName = ''] = (data.full_name ?? '').split(' ', 2);
+    const extra = data.profile_extra ?? {};
+
+    res.json({
+      firstName,
+      lastName,
+      email:        data.email ?? '',
+      phone:        data.phone ?? '',
+      avatar:       data.avatar_url ?? null,
+      organization: extra.organization ?? '',
+      jobTitle:     extra.jobTitle ?? '',
+      industry:     extra.industry ?? '',
+      timezone:     extra.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
+      bio:          extra.bio ?? '',
+    });
+  } catch (err) {
+    logger.error({ err, userId: req.user.id }, 'Get profile failed');
+    res.status(500).json({ error: 'Failed to load profile' });
+  }
+});
+
+// ── PUT /v1/users/me/profile ───────────────────────────────────────────────────
+router.put('/users/me/profile', requireAuth, async (req, res) => {
+  try {
+    const { firstName, lastName, email, phone, organization, jobTitle, industry, timezone, bio } = req.body;
+
+    if (!firstName?.trim() || !lastName?.trim()) {
+      return res.status(400).json({ error: 'First and last name are required' });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('users')
+      .update({
+        full_name: `${firstName.trim()} ${lastName.trim()}`,
+        email:     email ?? undefined,
+        phone:     phone ?? undefined,
+        profile_extra: { organization, jobTitle, industry, timezone, bio },
+      })
+      .eq('id', req.user.id)
+      .select('full_name, email, phone, avatar_url, profile_extra')
+      .single();
+
+    if (error) throw error;
+
+    logger.info({ userId: req.user.id }, 'Profile updated');
+    res.json({ success: true, data });
+  } catch (err) {
+    logger.error({ err, userId: req.user.id }, 'Update profile failed');
+    res.status(500).json({ error: 'Failed to update profile' });
+  }
+});
+
+// ── GET /v1/users/me/settings ──────────────────────────────────────────────────
+const DEFAULT_SETTINGS = {
+  theme:                            'light',
+  language:                         'en',
+  currency:                         'USD',
+  timezone:                         Intl.DateTimeFormat().resolvedOptions().timeZone,
+  dateFormat:                       'MM/DD/YYYY',
+  defaultSessionType:               'video',
+  defaultDuration:                  30,
+  preferredGender:                  'no_preference',
+  requireInterpreterCertification:  false,
+  autoRecord:                       false,
+  autoInvoice:                      true,
+  billingEmail:                     '',
+  invoiceFormat:                    'pdf',
+  paymentMethod:                    'wallet',
+  highContrast:                     false,
+  reduceMotion:                     false,
+  screenReader:                     false,
+};
+
+router.get('/users/me/settings', requireAuth, async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('users')
+      .select('settings')
+      .eq('id', req.user.id)
+      .single();
+
+    if (error) throw error;
+
+    res.json({ ...DEFAULT_SETTINGS, ...(data.settings ?? {}) });
+  } catch (err) {
+    logger.error({ err, userId: req.user.id }, 'Get settings failed');
+    res.status(500).json({ error: 'Failed to load settings' });
+  }
+});
+
+// ── PUT /v1/users/me/settings ──────────────────────────────────────────────────
+router.put('/users/me/settings', requireAuth, async (req, res) => {
+  try {
+    const { data: existing } = await supabaseAdmin
+      .from('users')
+      .select('settings')
+      .eq('id', req.user.id)
+      .single();
+
+    const merged = { ...DEFAULT_SETTINGS, ...(existing?.settings ?? {}), ...req.body };
+
+    const { error } = await supabaseAdmin
+      .from('users')
+      .update({ settings: merged })
+      .eq('id', req.user.id);
+
+    if (error) throw error;
+
+    logger.info({ userId: req.user.id }, 'Settings updated');
+    res.json({ success: true, data: merged });
+  } catch (err) {
+    logger.error({ err, userId: req.user.id }, 'Update settings failed');
+    res.status(500).json({ error: 'Failed to update settings' });
+  }
+});
+
 router.use('/admin', adminRouter);
 export default router;
