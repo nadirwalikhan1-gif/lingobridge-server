@@ -1362,5 +1362,123 @@ router.post('/conversations/:id/read', requireAuth, async (req, res) => {
   }
 });
 
+// ── DELETE /v1/users/me/payment-methods/:id ────────────────────────────────────
+router.delete('/users/me/payment-methods/:id', requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { data: method } = await supabaseAdmin
+      .from('payment_methods')
+      .select('id, user_id')
+      .eq('id', id)
+      .single();
+
+    if (!method || method.user_id !== req.user.id) {
+      return res.status(403).json({ error: 'Not authorized to remove this payment method' });
+    }
+
+    const { error } = await supabaseAdmin.from('payment_methods').delete().eq('id', id);
+    if (error) throw error;
+
+    logger.info({ userId: req.user.id, methodId: id }, 'Payment method removed');
+    res.json({ success: true });
+  } catch (err) {
+    logger.error({ err, userId: req.user.id }, 'Remove payment method failed');
+    res.status(500).json({ error: 'Failed to remove payment method' });
+  }
+});
+
+// ── PUT /v1/users/me/payment-methods/:id/default ───────────────────────────────
+router.put('/users/me/payment-methods/:id/default', requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { data: method } = await supabaseAdmin
+      .from('payment_methods')
+      .select('id, user_id')
+      .eq('id', id)
+      .single();
+
+    if (!method || method.user_id !== req.user.id) {
+      return res.status(403).json({ error: 'Not authorized to modify this payment method' });
+    }
+
+    // Clear existing default, then set the new one — two steps since Supabase
+    // doesn't support a single conditional "set all false except this one" update
+    await supabaseAdmin
+      .from('payment_methods')
+      .update({ is_default: false })
+      .eq('user_id', req.user.id);
+
+    const { error } = await supabaseAdmin
+      .from('payment_methods')
+      .update({ is_default: true })
+      .eq('id', id);
+
+    if (error) throw error;
+
+    logger.info({ userId: req.user.id, methodId: id }, 'Default payment method updated');
+    res.json({ success: true });
+  } catch (err) {
+    logger.error({ err, userId: req.user.id }, 'Set default payment method failed');
+    res.status(500).json({ error: 'Failed to set default payment method' });
+  }
+});
+
+// ── POST /v1/reviews/:id/helpful ────────────────────────────────────────────────
+router.post('/reviews/:id/helpful', requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { data, error } = await supabaseAdmin.rpc('increment_review_helpful', { review_id: id });
+
+    // Fallback if the RPC function doesn't exist yet — read-modify-write
+    if (error) {
+      const { data: review } = await supabaseAdmin
+        .from('session_ratings')
+        .select('helpful_count')
+        .eq('id', id)
+        .single();
+
+      const newCount = (review?.helpful_count ?? 0) + 1;
+
+      const { error: updateErr } = await supabaseAdmin
+        .from('session_ratings')
+        .update({ helpful_count: newCount })
+        .eq('id', id);
+
+      if (updateErr) throw updateErr;
+
+      return res.json({ success: true, helpfulCount: newCount });
+    }
+
+    res.json({ success: true, helpfulCount: data });
+  } catch (err) {
+    logger.error({ err, reviewId: req.params.id }, 'Mark review helpful failed');
+    res.status(500).json({ error: 'Failed to mark review as helpful' });
+  }
+});
+
+// ── POST /v1/reviews/:id/report ─────────────────────────────────────────────────
+router.post('/reviews/:id/report', requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reason } = req.body;
+
+    const ticket = await createSupportTicket({
+      userId:  req.user.id,
+      role:    'client',
+      subject: 'Review Flagged for Report',
+      message: `Review ID ${id} reported. Reason: ${reason || 'Not given'}`,
+    });
+
+    logger.info({ userId: req.user.id, reviewId: id, ticketId: ticket.id }, 'Review reported');
+    res.json({ success: true, ticketId: ticket.id });
+  } catch (err) {
+    logger.error({ err, reviewId: req.params.id }, 'Report review failed');
+    res.status(500).json({ error: 'Failed to report review' });
+  }
+});
+
 router.use('/admin', adminRouter);
 export default router;
