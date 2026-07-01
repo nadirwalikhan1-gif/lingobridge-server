@@ -140,4 +140,25 @@ export function acceptHandler(io, socket) {
       logger.error({ err, roomId }, 'reject-call failed');
     }
   });
+
+  // ── INTERPRETER DECLINES AN INCOMING REQUEST ──────────────────────────────
+  // Fire-and-forget from the client: no response event expected, the
+  // interpreter's own UI optimistically removes the card immediately.
+  // The room stays live so other online interpreters can still accept it —
+  // we only record that this interpreter passed on it.
+  socket.on('decline-call', async (data) => {
+    const { roomId } = data || {};
+    if (!roomId) return;
+
+    const interpreterId = socket.userId;
+    if (!interpreterId) return;
+
+    const room = getRoom(roomId);
+    if (!room) return; // already accepted/cancelled/expired — nothing to do
+
+    const declinedBy = room.declinedBy ? [...room.declinedBy, interpreterId] : [interpreterId];
+    updateRoom(roomId, { declinedBy });
+
+    logger.info({ roomId, interpreterId, declinedCount: declinedBy.length }, 'Interpreter declined call');
+  });
 }
