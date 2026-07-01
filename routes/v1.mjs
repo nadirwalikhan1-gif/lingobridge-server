@@ -1,11 +1,26 @@
 import adminRouter from './admin.mjs';
 import { Router } from 'express';
+import multer from 'multer';
 import { supabaseAdmin, verifySupabaseToken } from '../config/supabase.mjs';
 import { getSessionsByUser } from '../db/sessionRepo.mjs';
 import { getAvailableBalance } from '../db/walletRepo.mjs';
 import { logger } from '../config/logger.mjs';
 
 const router = Router();
+
+// In-memory storage — files are small (avatars) and immediately streamed to
+// Supabase Storage, never written to local disk.
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+  fileFilter: (req, file, cb) => {
+    const allowed = ['image/jpeg', 'image/png', 'image/webp'];
+    if (!allowed.includes(file.mimetype)) {
+      return cb(new Error('Only JPEG, PNG, or WebP images are allowed'));
+    }
+    cb(null, true);
+  },
+});
 
 // ── Token helper (add this here) ──────────────────────────────────────────────
 function generateToken() {
@@ -984,6 +999,85 @@ router.put('/users/me/settings', requireAuth, async (req, res) => {
   } catch (err) {
     logger.error({ err, userId: req.user.id }, 'Update settings failed');
     res.status(500).json({ error: 'Failed to update settings' });
+  }
+});
+
+// ── POST /v1/users/me/avatar ───────────────────────────────────────────────────
+// Requires a public Supabase Storage bucket named "avatars" to exist.
+// Create it once in the Supabase dashboard: Storage → New bucket → "avatars" → Public.
+router.post('/users/me/avatar', requireAuth, upload.single('avatar'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const ext = req.file.originalname.split('.').pop() || 'jpg';
+    const path = `${req.user.id}/avatar.${ext}`;
+
+    const { error: uploadErr } = await supabaseAdmin.storage
+      .from('avatars')
+      .upload(path, req.file.buffer, {
+        contentType: req.file.mimetype,
+        upsert: true,
+      });
+
+    if (uploadErr) throw uploadErr;
+
+    const { data: urlData } = supabaseAdmin.storage.from('avatars').getPublicUrl(path);
+    // Cache-bust so the browser doesn't show the old avatar after re-upload
+    const avatarUrl = `${urlData.publicUrl}?v=${Date.now()}`;
+
+    const { error: updateErr } = await supabaseAdmin
+      .from('users')
+      .update({ avatar_url: avatarUrl })
+      .eq('id', req.user.id);
+
+    if (updateErr) throw updateErr;
+
+    logger.info({ userId: req.user.id }, 'Avatar uploaded');
+    res.json({ avatar: avatarUrl });
+  } catch (err) {
+    logger.error({ err, userId: req.user.id }, 'Avatar upload failed');
+    res.status(500).json({ error: err.message || 'Failed to upload avatar' });
+  }
+});
+
+// ── PUT /v1/users/me/password ──────────────────────────────────────────────────
+router.put('/users/me/password', requireAuth, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ error: 'Current and new password are required' });
+    }
+    if (newPassword.length < 8) {
+      return res.status(400).json({ error: 'New password must be at least 8 characters' });
+    }
+
+    // Verify current password by attempting a sign-in — this is the only
+    // reliable way to check a password against Supabase Auth without
+    // storing it ourselves.
+    const { error: signInErr } = await supabaseAdmin.auth.signInWithPassword({
+      email:    req.user.email,
+      password: currentPassword,
+    });
+
+    if (signInErr) {
+      return res.status(401).json({ error: 'Current password is incorrect' });
+    }
+
+    const { error: updateErr } = await supabaseAdmin.auth.admin.updateUserById(
+      req.user.id,
+      { password: newPassword }
+    );
+
+    if (updateErr) throw updateErr;
+
+    logger.info({ userId: req.user.id }, 'Password changed');
+    res.json({ success: true });
+  } catch (err) {
+    logger.error({ err, userId: req.user.id }, 'Password change failed');
+    res.status(500).json({ error: 'Failed to change password' });
   }
 });
 
