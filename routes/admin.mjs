@@ -205,35 +205,66 @@ router.get('/transactions', requireAdmin, async (req, res) => {
 });
 
 // ── Disputes ──────────────────────────────────────────────────────────────────
+// GET /v1/admin/disputes
+// Shows every dispute with both parties clearly identified, which side
+// raised it (client billing/charge complaint vs interpreter complaint),
+// the session it's tied to, and the disputed amount.
 router.get('/disputes', requireAdmin, async (req, res) => {
   try {
-    const { data, error } = await supabaseAdmin
+    const { status } = req.query;
+
+    let query = supabaseAdmin
       .from('disputes')
-      .select('*')
+      .select(`
+        id, session_id, reason, status, resolution, admin_notes, raised_by, created_at, updated_at,
+        client:users!disputes_client_id_fkey(id, full_name, email),
+        interpreter:users!disputes_interpreter_id_fkey(id, full_name),
+        session:sessions(id, session_type, language, started_at)
+      `)
       .order('created_at', { ascending: false })
-      .limit(50);
+      .limit(100);
+
+    if (status && status !== 'all') query = query.eq('status', status);
+
+    const { data, error } = await query;
     if (error) throw error;
 
-    const userIds = [...new Set((data || []).map(d => d.raised_by).filter(Boolean))];
-    let usersMap = {};
-    if (userIds.length) {
-      const { data: users } = await supabaseAdmin
-        .from('users')
-        .select('id, full_name')
-        .in('id', userIds);
-      usersMap = Object.fromEntries((users || []).map(u => [u.id, u]));
+    const sessionIds = [...new Set((data || []).map(d => d.session_id).filter(Boolean))];
+    let amountsBySession = {};
+    if (sessionIds.length) {
+      const { data: charges } = await supabaseAdmin
+        .from('transactions')
+        .select('session_id, amount')
+        .in('session_id', sessionIds)
+        .in('type', ['charge_active', 'charge_hold']);
+
+      amountsBySession = (charges || []).reduce((acc, t) => {
+        acc[t.session_id] = (acc[t.session_id] ?? 0) + (t.amount ?? 0);
+        return acc;
+      }, {});
     }
 
-    res.json((data || []).map(d => ({
-      id:          d.id,
-      title:       d.reason || 'Dispute',
-      ref:         `#${String(d.id).slice(0, 8).toUpperCase()}`,
-      status:      d.status || 'open',
-      client:      usersMap[d.raised_by]?.full_name || 'Unknown',
-      interpreter: null,
-      amount:      null,
-      timeAgo:     timeAgo(d.created_at),
-    })));
+    const disputes = (data || []).map(d => ({
+      id:            d.id,
+      ref:           `#${String(d.id).slice(0, 8).toUpperCase()}`,
+      title:         d.reason || 'Dispute',
+      status:        d.status || 'open',
+      raisedByRole:  d.raised_by === d.client?.id ? 'client' : 'interpreter',
+      client:        d.client?.full_name ?? 'Unknown',
+      clientEmail:   d.client?.email ?? null,
+      interpreter:   d.interpreter?.full_name ?? 'Unknown',
+      sessionType:   d.session?.session_type ?? null,
+      language:      d.session?.language ?? null,
+      amount:        amountsBySession[d.session_id]
+                        ? parseFloat(amountsBySession[d.session_id].toFixed(2))
+                        : null,
+      resolution:    d.resolution ?? null,
+      adminNotes:    d.admin_notes ?? null,
+      timeAgo:       timeAgo(d.created_at),
+      createdAt:     d.created_at,
+    }));
+
+    res.json(disputes);
   } catch (err) {
     logger.error({ err }, 'Admin disputes error');
     res.status(500).json({ error: 'Failed to load disputes' });
