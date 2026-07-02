@@ -438,14 +438,72 @@ router.get('/communications', requireAdmin, async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
       .from('conversations')
-      .select('*, messages(content, created_at)')
+      .select(`
+        *,
+        client:users!conversations_client_id_fkey(full_name),
+        interpreter:users!conversations_interpreter_id_fkey(full_name),
+        messages(id, text, sender_id, read, created_at)
+      `)
       .order('updated_at', { ascending: false })
       .limit(50);
     if (error) throw error;
-    res.json(data || []);
+
+    const threads = (data || []).map(c => {
+      const msgs = c.messages ?? [];
+      const last = msgs[msgs.length - 1];
+      return {
+        id:           c.id,
+        type:         'support', // conversations are client<->interpreter threads; disputes/system handled separately
+        participants: [
+          { name: c.client?.full_name ?? 'Client' },
+          { name: c.interpreter?.full_name ?? 'Interpreter' },
+        ],
+        lastMessage:  last?.text ?? '',
+        unreadCount:  msgs.filter(m => !m.read).length,
+        updatedAt:    c.updated_at,
+        messages:     msgs,
+      };
+    });
+
+    res.json(threads);
   } catch (err) {
     logger.error({ err }, 'Admin communications error');
     res.json([]);
+  }
+});
+
+router.post('/communications/:id/reply', requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { text } = req.body;
+
+    if (!text?.trim()) {
+      return res.status(400).json({ error: 'Reply text is required' });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('messages')
+      .insert({
+        conversation_id: id,
+        sender_id:        req.user.id,
+        text,
+        read:             false,
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    await supabaseAdmin
+      .from('conversations')
+      .update({ updated_at: new Date().toISOString() })
+      .eq('id', id);
+
+    logger.info({ adminId: req.user.id, conversationId: id }, 'Admin sent reply');
+    res.json(data);
+  } catch (err) {
+    logger.error({ err, conversationId: req.params.id }, 'Admin reply failed');
+    res.status(500).json({ error: 'Failed to send reply' });
   }
 });
 

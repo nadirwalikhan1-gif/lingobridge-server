@@ -3,7 +3,9 @@
 
 import { supabaseAdmin } from '../../config/supabase.mjs';
 import { logger } from '../../config/logger.mjs';
-import { getPendingRooms } from '../runtime/sessionRuntime.mjs';
+import { getPendingRooms, getRoom, deleteRoom } from '../runtime/sessionRuntime.mjs';
+import { releaseReservation } from '../../db/walletRepo.mjs';
+import { updateSessionStatus } from '../../db/sessionRepo.mjs';
 import { eventBus, EVENTS } from '../../utils/eventBus.mjs';
 
 async function getPlatformStats() {
@@ -190,6 +192,55 @@ export function registerAdminHandlers(io, socket) {
       await supabaseAdmin.from('payout_requests').update({ status: 'approved' }).eq('id', payoutId);
       io.to('admins').emit('payout-approved', { id: payoutId });
     } catch (e) { logger.error(e, 'approve-payout error'); }
+  });
+
+  // ── ADMIN MANUALLY RE-BROADCASTS A STUCK PENDING REQUEST ──────────────────
+  // Requests already auto-broadcast to all online interpreters on creation
+  // (see requestHandler.mjs). This re-nudges a request that's been pending
+  // too long — useful when interpreters missed the original broadcast
+  // (e.g. they connected after it fired).
+  socket.on('admin-assign-interpreter', async ({ requestId }) => {
+    try {
+      const room = getRoom(requestId);
+      if (!room) {
+        socket.emit('error', { code: 'ROOM_NOT_FOUND', message: 'Request no longer pending' });
+        return;
+      }
+
+      io.to('interpreters').emit('new-request', { roomId: requestId, ...room.requestData });
+      io.to('admins').emit('request-reassigned', { requestId });
+
+      logger.info({ requestId, adminId: socket.userId }, 'Admin re-broadcast pending request');
+    } catch (e) {
+      logger.error(e, 'admin-assign-interpreter error');
+    }
+  });
+
+  // ── ADMIN SKIPS/CANCELS A PENDING REQUEST ──────────────────────────────────
+  // Releases the client's reserved funds, marks the session cancelled, and
+  // removes the room — same cleanup as a client-initiated cancel, just
+  // triggered by an admin instead.
+  socket.on('admin-skip-request', async ({ requestId }) => {
+    try {
+      const room = getRoom(requestId);
+      if (!room) {
+        socket.emit('error', { code: 'ROOM_NOT_FOUND', message: 'Request no longer pending' });
+        return;
+      }
+
+      await releaseReservation(room.clientUserId, room.reservedAmount, 'client');
+      eventBus.emit(EVENTS.WALLET_CREDITED, { userId: room.clientUserId });
+      await updateSessionStatus(room.sessionId, 'cancelled', { ended_at: new Date().toISOString() });
+
+      deleteRoom(requestId);
+
+      io.to('interpreters').emit('request-cancelled', { roomId: requestId });
+      io.to('admins').emit('request-cancelled', { roomId: requestId });
+
+      logger.info({ requestId, adminId: socket.userId }, 'Admin skipped/cancelled request');
+    } catch (e) {
+      logger.error(e, 'admin-skip-request error');
+    }
   });
 
   // ── Real-time top-up push ─────────────────────────────────────
