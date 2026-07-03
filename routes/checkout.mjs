@@ -34,7 +34,7 @@ router.post('/', requireAuth, async (req, res) => {
     const url = await createCheckout(userId, amount, currency);
     await audit(userId, AUDIT_ACTIONS.CHECKOUT_CREATED, { amount, currency });
     logger.info({ userId, amount, currency }, 'Checkout URL created');
-    return res.status(200).json({ url });
+    return res.status(200).json({ data: { url } });
   } catch (err) {
     logger.error({ err, userId }, 'Checkout creation failed');
     return res.status(400).json({ error: err.message });

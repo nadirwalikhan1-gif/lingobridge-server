@@ -892,16 +892,18 @@ router.get('/users/me/profile', requireAuth, async (req, res) => {
     const extra = data.profile_extra ?? {};
 
     res.json({
-      firstName,
-      lastName,
-      email:        data.email ?? '',
-      phone:        data.phone ?? '',
-      avatar:       data.avatar_url ?? null,
-      organization: extra.organization ?? '',
-      jobTitle:     extra.jobTitle ?? '',
-      industry:     extra.industry ?? '',
-      timezone:     extra.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
-      bio:          extra.bio ?? '',
+      data: {
+        firstName,
+        lastName,
+        email:        data.email ?? '',
+        phone:        data.phone ?? '',
+        avatar:       data.avatar_url ?? null,
+        organization: extra.organization ?? '',
+        jobTitle:     extra.jobTitle ?? '',
+        industry:     extra.industry ?? '',
+        timezone:     extra.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
+        bio:          extra.bio ?? '',
+      }
     });
   } catch (err) {
     logger.error({ err, userId: req.user.id }, 'Get profile failed');
@@ -971,7 +973,7 @@ router.get('/users/me/settings', requireAuth, async (req, res) => {
 
     if (error) throw error;
 
-    res.json({ ...DEFAULT_SETTINGS, ...(data.settings ?? {}) });
+    res.json({ data: { ...DEFAULT_SETTINGS, ...(data.settings ?? {}) } });
   } catch (err) {
     logger.error({ err, userId: req.user.id }, 'Get settings failed');
     res.status(500).json({ error: 'Failed to load settings' });
@@ -1037,7 +1039,7 @@ router.post('/users/me/avatar', requireAuth, upload.single('avatar'), async (req
     if (updateErr) throw updateErr;
 
     logger.info({ userId: req.user.id }, 'Avatar uploaded');
-    res.json({ avatar: avatarUrl });
+    res.json({ data: { avatar: avatarUrl } });
   } catch (err) {
     logger.error({ err, userId: req.user.id }, 'Avatar upload failed');
     res.status(500).json({ error: err.message || 'Failed to upload avatar' });
@@ -1076,7 +1078,7 @@ router.put('/users/me/password', requireAuth, async (req, res) => {
     if (updateErr) throw updateErr;
 
     logger.info({ userId: req.user.id }, 'Password changed');
-    res.json({ success: true });
+    res.json({ data: { success: true } });
   } catch (err) {
     logger.error({ err, userId: req.user.id }, 'Password change failed');
     res.status(500).json({ error: 'Failed to change password' });
@@ -1106,7 +1108,7 @@ router.post('/users/me/export', requireAuth, async (req, res) => {
     };
 
     logger.info({ userId }, 'Data export generated');
-    res.json(exportPayload);
+    res.json({ data: exportPayload });
   } catch (err) {
     logger.error({ err, userId: req.user.id }, 'Data export failed');
     res.status(500).json({ error: 'Failed to export data' });
@@ -1147,7 +1149,7 @@ router.post('/users/me/delete-request', requireAuth, async (req, res) => {
     }
 
     logger.info({ userId: req.user.id, ticketId: ticket.id }, 'Account deletion requested');
-    res.json({ success: true, ticketId: ticket.id });
+    res.json({ data: { success: true, ticketId: ticket.id } });
   } catch (err) {
     logger.error({ err, userId: req.user.id }, 'Delete request failed');
     res.status(500).json({ error: 'Failed to submit deletion request' });
@@ -1185,7 +1187,7 @@ router.post('/users/me/baa-request', requireAuth, async (req, res) => {
     }
 
     logger.info({ userId: req.user.id, ticketId: ticket.id }, 'BAA requested');
-    res.json({ success: true, ticketId: ticket.id });
+    res.json({ data: { success: true, ticketId: ticket.id } });
   } catch (err) {
     logger.error({ err, userId: req.user.id }, 'BAA request failed');
     res.status(500).json({ error: 'Failed to submit BAA request' });
@@ -1219,10 +1221,10 @@ router.get('/interpreters/search', requireAuth, async (req, res) => {
       languages: i.languages ?? [],
     }));
 
-    res.json({ interpreters });
+    res.json({ data: { interpreters } });
   } catch (err) {
     logger.error({ err }, 'Interpreter search failed');
-    res.json({ interpreters: [] });
+    res.json({ data: { interpreters: [] } });
   }
 });
 
@@ -1242,7 +1244,7 @@ router.post('/conversations', requireAuth, async (req, res) => {
       .eq('interpreter_id', interpreterId)
       .maybeSingle();
 
-    if (existing) return res.json(existing);
+    if (existing) return res.json({ data: existing });
 
     const { data, error } = await supabaseAdmin
       .from('conversations')
@@ -1253,7 +1255,7 @@ router.post('/conversations', requireAuth, async (req, res) => {
     if (error) throw error;
 
     logger.info({ userId: req.user.id, interpreterId, conversationId: data.id }, 'Conversation started');
-    res.json(data);
+    res.json({ data });
   } catch (err) {
     logger.error({ err, userId: req.user.id }, 'Start conversation failed');
     res.status(500).json({ error: 'Failed to start conversation' });
@@ -1289,7 +1291,7 @@ router.get('/conversations/:id/messages', requireAuth, async (req, res) => {
     const { data, error } = await query;
     if (error) throw error;
 
-    res.json({ messages: (data || []).reverse() });
+    res.json({ data: { messages: (data || []).reverse() } });
   } catch (err) {
     logger.error({ err, conversationId: req.params.id }, 'Fetch messages failed');
     res.status(500).json({ error: 'Failed to load messages' });
@@ -1335,7 +1337,7 @@ router.post('/conversations/:id/messages', requireAuth, async (req, res) => {
       .update({ updated_at: new Date().toISOString() })
       .eq('id', id);
 
-    res.json(data);
+    res.json({ data });
   } catch (err) {
     logger.error({ err, conversationId: req.params.id }, 'Send message failed');
     res.status(500).json({ error: 'Failed to send message' });
@@ -1355,7 +1357,7 @@ router.post('/conversations/:id/read', requireAuth, async (req, res) => {
 
     if (error) throw error;
 
-    res.json({ success: true });
+    res.json({ data: { success: true } });
   } catch (err) {
     logger.error({ err, conversationId: req.params.id }, 'Mark read failed');
     res.status(500).json({ error: 'Failed to mark as read' });
@@ -1381,7 +1383,7 @@ router.delete('/users/me/payment-methods/:id', requireAuth, async (req, res) => 
     if (error) throw error;
 
     logger.info({ userId: req.user.id, methodId: id }, 'Payment method removed');
-    res.json({ success: true });
+    res.json({ data: { success: true } });
   } catch (err) {
     logger.error({ err, userId: req.user.id }, 'Remove payment method failed');
     res.status(500).json({ error: 'Failed to remove payment method' });
@@ -1418,7 +1420,7 @@ router.put('/users/me/payment-methods/:id/default', requireAuth, async (req, res
     if (error) throw error;
 
     logger.info({ userId: req.user.id, methodId: id }, 'Default payment method updated');
-    res.json({ success: true });
+    res.json({ data: { success: true } });
   } catch (err) {
     logger.error({ err, userId: req.user.id }, 'Set default payment method failed');
     res.status(500).json({ error: 'Failed to set default payment method' });
@@ -1449,10 +1451,10 @@ router.post('/reviews/:id/helpful', requireAuth, async (req, res) => {
 
       if (updateErr) throw updateErr;
 
-      return res.json({ success: true, helpfulCount: newCount });
+      return res.json({ data: { success: true, helpfulCount: newCount } });
     }
 
-    res.json({ success: true, helpfulCount: data });
+    res.json({ data: { success: true, helpfulCount: data } });
   } catch (err) {
     logger.error({ err, reviewId: req.params.id }, 'Mark review helpful failed');
     res.status(500).json({ error: 'Failed to mark review as helpful' });
@@ -1473,10 +1475,47 @@ router.post('/reviews/:id/report', requireAuth, async (req, res) => {
     });
 
     logger.info({ userId: req.user.id, reviewId: id, ticketId: ticket.id }, 'Review reported');
-    res.json({ success: true, ticketId: ticket.id });
+    res.json({ data: { success: true, ticketId: ticket.id } });
   } catch (err) {
     logger.error({ err, reviewId: req.params.id }, 'Report review failed');
     res.status(500).json({ error: 'Failed to report review' });
+  }
+});
+
+// ── GET /v1/users/me/sessions ──────────────────────────────────────────────────
+// Active login sessions/devices for the security tab. Calls a Postgres
+// function since Supabase's JS client has no public API to list individual
+// sessions — see migration 20260702_session_management_functions.sql.
+router.get('/users/me/sessions', requireAuth, async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin.rpc('get_user_sessions', { uid: req.user.id });
+    if (error) throw error;
+
+    res.json({ data: { sessions: data || [] } });
+  } catch (err) {
+    logger.error({ err, userId: req.user.id }, 'Get sessions failed');
+    res.status(500).json({ error: 'Failed to load active sessions' });
+  }
+});
+
+// ── DELETE /v1/users/me/sessions/:sessionId ────────────────────────────────────
+router.delete('/users/me/sessions/:sessionId', requireAuth, async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+
+    const { data: revoked, error } = await supabaseAdmin.rpc('revoke_user_session', {
+      session_id: sessionId,
+      uid:        req.user.id,
+    });
+
+    if (error) throw error;
+    if (!revoked) return res.status(404).json({ error: 'Session not found' });
+
+    logger.info({ userId: req.user.id, sessionId }, 'Session revoked');
+    res.json({ data: { success: true } });
+  } catch (err) {
+    logger.error({ err, userId: req.user.id, sessionId: req.params.sessionId }, 'Revoke session failed');
+    res.status(500).json({ error: 'Failed to revoke session' });
   }
 });
 
