@@ -1,5 +1,5 @@
 import { logger } from '../../config/logger.mjs';
-import { setInterpreterAvailability, setInterpreterStatus } from '../../db/interpreterRepo.mjs';
+import { setInterpreterStatus } from '../../db/interpreterRepo.mjs';
 import { getWalletByUserId } from '../../db/walletRepo.mjs';           // FIX: vault-model
 import { supabaseAdmin } from '../../config/supabase.mjs';             // FIX: vault-model
 import { getPendingRooms } from '../runtime/sessionRuntime.mjs';
@@ -21,9 +21,14 @@ export function requestHandler(io, socket) {
       socket.interpreterRole = true;
 
       if (socket.userId) {
-        await setInterpreterAvailability(socket.userId, true).catch((err) =>
-          logger.warn({ err, userId: socket.userId }, 'setInterpreterAvailability failed')
+        // FIX: was only setInterpreterAvailability (is_available boolean) —
+        // never touched the `status` text column at all, so any page reading
+        // interpreter.status directly (dashboard stats, etc.) always saw a
+        // stale value. Only 'go-on-break' was correctly setting `status`.
+        await setInterpreterStatus(socket.userId, 'online').catch((err) =>
+          logger.warn({ err, userId: socket.userId }, 'setInterpreterStatus(online) failed')
         );
+        socket.emit('status-update', { status: 'online' });
 
         // FIX: vault-model — ensure interpreter has an earnings vault
         try {
@@ -67,9 +72,11 @@ export function requestHandler(io, socket) {
     socket.interpreterRole = false;
 
     if (socket.userId) {
-      await setInterpreterAvailability(socket.userId, false).catch((err) =>
-        logger.warn({ err, userId: socket.userId }, 'setInterpreterAvailability(offline) failed')
+      // FIX: same is_available-only gap as 'register' above.
+      await setInterpreterStatus(socket.userId, 'offline').catch((err) =>
+        logger.warn({ err, userId: socket.userId }, 'setInterpreterStatus(offline) failed')
       );
+      socket.emit('status-update', { status: 'offline' });
     }
 
     logger.info({ socketId: socket.id, userId: socket.userId }, 'Interpreter went offline');
@@ -81,9 +88,11 @@ export function requestHandler(io, socket) {
     socket.interpreterRole = true;
 
     if (socket.userId) {
-      await setInterpreterAvailability(socket.userId, true).catch((err) =>
-        logger.warn({ err, userId: socket.userId }, 'setInterpreterAvailability(online) failed')
+      // FIX: same is_available-only gap as 'register' above.
+      await setInterpreterStatus(socket.userId, 'online').catch((err) =>
+        logger.warn({ err, userId: socket.userId }, 'setInterpreterStatus(online) failed')
       );
+      socket.emit('status-update', { status: 'online' });
 
       // FIX: vault-model — ensure interpreter vault exists on reconnect too
       try {
