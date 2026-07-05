@@ -1,5 +1,5 @@
 import { logger } from '../../config/logger.mjs';
-import { setInterpreterStatus } from '../../db/interpreterRepo.mjs';
+import { setInterpreterAvailability, setInterpreterStatus } from '../../db/interpreterRepo.mjs';
 import { getWalletByUserId } from '../../db/walletRepo.mjs';           // FIX: vault-model
 import { supabaseAdmin } from '../../config/supabase.mjs';             // FIX: vault-model
 import { getPendingRooms } from '../runtime/sessionRuntime.mjs';
@@ -21,14 +21,17 @@ export function requestHandler(io, socket) {
       socket.interpreterRole = true;
 
       if (socket.userId) {
-        // FIX: was only setInterpreterAvailability (is_available boolean) —
-        // never touched the `status` text column at all, so any page reading
-        // interpreter.status directly (dashboard stats, etc.) always saw a
-        // stale value. Only 'go-on-break' was correctly setting `status`.
-        await setInterpreterStatus(socket.userId, 'online').catch((err) =>
-          logger.warn({ err, userId: socket.userId }, 'setInterpreterStatus(online) failed')
+        // FIX: 'register' is ALSO auto-emitted by lib/socket.js on every
+        // single connect/reconnect (page nav, tab refocus, network blip) —
+        // completely separate from a deliberate "go online" click. It must
+        // NOT force status to 'online' here, or any reconnect silently
+        // overwrites an interpreter's explicit Break/Offline choice. Socket
+        // housekeeping (room join, vault check) still happens; the actual
+        // "online" status write now only happens via the dedicated
+        // 'go-online' event, fired only when the user explicitly picks it.
+        await setInterpreterAvailability(socket.userId, true).catch((err) =>
+          logger.warn({ err, userId: socket.userId }, 'setInterpreterAvailability failed')
         );
-        socket.emit('status-update', { status: 'online' });
 
         // FIX: vault-model — ensure interpreter has an earnings vault
         try {
