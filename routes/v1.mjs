@@ -1519,5 +1519,31 @@ router.delete('/users/me/sessions/:sessionId', requireAuth, async (req, res) => 
   }
 });
 
+// ── POST /v1/sessions/:id/feedback ─────────────────────────────────────────────
+// Interpreter's post-call feedback (call quality + flags like "client issue",
+// "technical problem") — distinct from the client's rating of the
+// interpreter (POST /sessions/:id/rate). No dedicated table for this yet,
+// logged as a support ticket for admin visibility, same pattern as
+// BAA/delete-request.
+router.post('/sessions/:id/feedback', requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { callQuality, comment, flags = [] } = req.body;
+
+    const ticket = await createSupportTicket({
+      userId:  req.user.id,
+      role:    'interpreter',
+      subject: 'Post-call feedback',
+      message: `Session ${id} — quality: ${callQuality}/5${flags.length ? `, flags: ${flags.join(', ')}` : ''}${comment ? `, comment: ${comment}` : ''}`,
+    });
+
+    logger.info({ userId: req.user.id, sessionId: id, ticketId: ticket.id }, 'Interpreter feedback logged');
+    res.json({ data: { success: true, ticketId: ticket.id } });
+  } catch (err) {
+    logger.error({ err, sessionId: req.params.id }, 'Interpreter feedback failed');
+    res.status(500).json({ error: 'Failed to submit feedback' });
+  }
+});
+
 router.use('/admin', adminRouter);
 export default router;
