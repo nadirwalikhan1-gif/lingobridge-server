@@ -33,20 +33,24 @@ export function requestHandler(io, socket) {
           logger.warn({ err, userId: socket.userId }, 'setInterpreterAvailability failed')
         );
 
-        // FIX: vault-model — ensure interpreter has an earnings vault
+        // FIX: vault-model — ensure interpreter has an earnings vault.
+        // Upsert (matching authSocket.mjs / acceptHandler.mjs) rather than a
+        // plain insert, so concurrent connections can't collide on the
+        // (user_id, vault_type) constraint.
         try {
           await getWalletByUserId(socket.userId, 'interpreter');
         } catch (e) {
-          await supabaseAdmin
+          const { error: insertErr } = await supabaseAdmin
             .from('wallets')
-            .insert({
-              user_id: socket.userId,
-              vault_type: 'interpreter',
-              balance: 0,
-              currency: 'USD',
-              reserved_balance: 0,
-            });
-          logger.info({ userId: socket.userId }, 'Created interpreter vault wallet');
+            .upsert(
+              { user_id: socket.userId, vault_type: 'interpreter', balance: 0, currency: 'USD', reserved_balance: 0 },
+              { onConflict: 'user_id,vault_type', ignoreDuplicates: true }
+            );
+          if (insertErr) {
+            logger.error({ err: insertErr, userId: socket.userId }, 'Failed to create interpreter vault wallet');
+          } else {
+            logger.info({ userId: socket.userId }, 'Created interpreter vault wallet');
+          }
         }
       }
 
@@ -104,19 +108,21 @@ export function requestHandler(io, socket) {
       io.to(`user:${socket.userId}`).emit('status-update', { status: 'online' });
 
       // FIX: vault-model — ensure interpreter vault exists on reconnect too
+      // (upsert, matching authSocket.mjs / acceptHandler.mjs)
       try {
         await getWalletByUserId(socket.userId, 'interpreter');
       } catch (e) {
-        await supabaseAdmin
+        const { error: insertErr } = await supabaseAdmin
           .from('wallets')
-          .insert({
-            user_id: socket.userId,
-            vault_type: 'interpreter',
-            balance: 0,
-            currency: 'USD',
-            reserved_balance: 0,
-          });
-        logger.info({ userId: socket.userId }, 'Created interpreter vault wallet');
+          .upsert(
+            { user_id: socket.userId, vault_type: 'interpreter', balance: 0, currency: 'USD', reserved_balance: 0 },
+            { onConflict: 'user_id,vault_type', ignoreDuplicates: true }
+          );
+        if (insertErr) {
+          logger.error({ err: insertErr, userId: socket.userId }, 'Failed to create interpreter vault wallet');
+        } else {
+          logger.info({ userId: socket.userId }, 'Created interpreter vault wallet');
+        }
       }
     }
 
