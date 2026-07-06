@@ -66,6 +66,16 @@ export async function createSocketServer(httpServer) {
     const role = socket.role; // set by authSocketMiddleware
     logger.info({ socketId: socket.id, userId: socket.userId, role }, 'Socket connected');
 
+    // FIX: cross-tab/device sync — join a per-user room so events like
+    // 'status-update' can be broadcast to every connection this user has
+    // open (e.g. Dashboard tab + Availability tab), not just the socket
+    // that triggered the change. Role rooms ('interpreters', 'admins')
+    // only ever reach OTHER users' sockets, never the acting user's own
+    // other tabs — this room is what makes self-sync possible.
+    if (socket.userId) {
+      socket.join(`user:${socket.userId}`)
+    }
+
     // FIX: Join role-based rooms immediately on connect (before any 'register' event)
     if (role === 'interpreter') {
       socket.join('interpreters');

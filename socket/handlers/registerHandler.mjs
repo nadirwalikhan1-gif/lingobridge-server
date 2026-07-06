@@ -79,7 +79,10 @@ export function requestHandler(io, socket) {
       await setInterpreterStatus(socket.userId, 'offline').catch((err) =>
         logger.warn({ err, userId: socket.userId }, 'setInterpreterStatus(offline) failed')
       );
-      socket.emit('status-update', { status: 'offline' });
+      // FIX: was socket.emit (only reached the tab that clicked it) — now
+      // broadcasts to every open tab/device for this user via the
+      // per-user room joined in socket/index.mjs on connect.
+      io.to(`user:${socket.userId}`).emit('status-update', { status: 'offline' });
     }
 
     logger.info({ socketId: socket.id, userId: socket.userId }, 'Interpreter went offline');
@@ -95,7 +98,10 @@ export function requestHandler(io, socket) {
       await setInterpreterStatus(socket.userId, 'online').catch((err) =>
         logger.warn({ err, userId: socket.userId }, 'setInterpreterStatus(online) failed')
       );
-      socket.emit('status-update', { status: 'online' });
+      // FIX: was socket.emit (only reached the tab that clicked it) — now
+      // broadcasts to every open tab/device for this user via the
+      // per-user room joined in socket/index.mjs on connect.
+      io.to(`user:${socket.userId}`).emit('status-update', { status: 'online' });
 
       // FIX: vault-model — ensure interpreter vault exists on reconnect too
       try {
@@ -123,12 +129,22 @@ export function requestHandler(io, socket) {
   });
 
   // ── GO ON BREAK ───────────────────────────────────────────────
-  // REMOVED: platform decision — interpreter availability is now binary
-  // (Online/Offline) only. Neither Dashboard.jsx nor Availability.jsx emits
-  // 'go-on-break' anymore (both moved to a shared statusConfig.js with just
-  // STATUS.ONLINE/STATUS.OFFLINE). This handler is intentionally deleted
-  // rather than left in place unreachable — see the project's established
-  // practice of not leaving dead code as a trap for the next person who
-  // finds it. Accompanying DB migration backfills any existing 'break' rows
-  // to 'offline' and tightens the status CHECK constraint to match.
+  // Added to back the dashboard's three-state availability toggle
+  // (Online / Break / Offline). Leaves the 'interpreters' room same as
+  // offline (so no new requests are routed here), but persists a distinct
+  // 'break' status so the UI can show it differently from fully offline.
+  socket.on('go-on-break', async () => {
+    if (!socket.interpreterRole) return;
+
+    socket.leave('interpreters');
+
+    if (socket.userId) {
+      await setInterpreterStatus(socket.userId, 'break').catch((err) =>
+        logger.warn({ err, userId: socket.userId }, 'setInterpreterStatus(break) failed')
+      );
+    }
+
+    socket.emit('status-update', { status: 'break' });
+    logger.info({ socketId: socket.id, userId: socket.userId }, 'Interpreter went on break');
+  });
 }
