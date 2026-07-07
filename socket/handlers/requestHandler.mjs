@@ -1,16 +1,24 @@
 import { v4 as uuidv4 } from 'uuid';
 import { validateEvent } from '../../middleware/validateEvent.mjs';
 import { rateLimitSocket } from '../../middleware/rateLimiter.mjs';
-import { addRoom, getRoom } from '../runtime/sessionRuntime.mjs';
+import { addRoom, getRoom, updateRoom } from '../runtime/sessionRuntime.mjs';
 import { createSession } from '../../db/sessionRepo.mjs';
 import { reserveFunds, getAvailableBalance } from '../../db/walletRepo.mjs';
+import { getInterpreterByUserId } from '../../db/interpreterRepo.mjs';
 import { generateAgoraToken } from '../../services/agoraService.mjs';
 import { CLIENT_RATES } from '../../utils/constants.mjs'; // FIX: vault-model client rates
 import { eventBus, EVENTS } from '../../utils/eventBus.mjs';
+import { emitToUser } from '../../utils/socketUtils.mjs';
 import { logger } from '../../config/logger.mjs';
 
 // TEMP: set to true to disable wallet check for free call testing
 const FREE_CALL_TESTING = false;
+
+// FIX: when a client selects a specific interpreter, give that interpreter
+// this long to accept before silently opening the request to everyone else.
+// Chosen to stay well within the platform's "<1 min" connect promise even
+// after falling back.
+const PREFERRED_INTERPRETER_WINDOW_MS = 20_000;
 
 export function requestHandler(io, socket) {
   socket.on('request-call', async (data) => {
@@ -36,9 +44,25 @@ export function requestHandler(io, socket) {
       duration,
       category,
       interpreterName,
+      interpreterId,
     } = sanitized;
 
     const roomId = uuidv4();
+
+    // FIX: resolve whether the client's selected interpreter can actually be
+    // targeted first. Falls back to null (broadcast-to-all, today's
+    // behavior) if no interpreter was selected, the id doesn't correspond to
+    // a real interpreter, or they're not currently available — a stale or
+    // invalid interpreterId should never block booking.
+    let targetInterpreterId = null;
+    if (interpreterId) {
+      try {
+        const candidate = await getInterpreterByUserId(interpreterId);
+        if (candidate?.is_available) targetInterpreterId = interpreterId;
+      } catch (e) {
+        // not a real / not currently available interpreter — fall through to broadcast
+      }
+    }
 
     try {
       let wallet = { currency: 'USD', availableBalance: 0 };
@@ -98,6 +122,11 @@ export function requestHandler(io, socket) {
         reservedAmount: reserve,
         channelName:    roomId,
         createdAt:      Date.now(), // used by jobs/requestTimeouts.mjs
+        // FIX: preference window — while set and unexpired, only this
+        // interpreter is allowed to accept (see acceptHandler.mjs). Cleared
+        // once the fallback broadcast fires below.
+        preferredInterpreterId: targetInterpreterId,
+        preferredUntil:         targetInterpreterId ? Date.now() + PREFERRED_INTERPRETER_WINDOW_MS : null,
         requestData: {
           language,
           fromLang:       fromLang ?? language,
@@ -106,6 +135,7 @@ export function requestHandler(io, socket) {
           duration,
           category,
           interpreterName,
+          interpreterId:  targetInterpreterId,
           roomId,
           channelName:    roomId,
         },
@@ -134,8 +164,27 @@ export function requestHandler(io, socket) {
         clientName: socket.userEmail?.split('@')[0] ?? 'Client',
       };
 
-      io.to('interpreters').emit('new-request', requestPayload);
       io.to('admins').emit('new-request', requestPayload);
+
+      if (targetInterpreterId) {
+        // FIX: preference window — send only to the selected interpreter
+        // first, instead of broadcasting to everyone immediately. If they
+        // don't accept in time, open it up to everyone exactly as before.
+        emitToUser(io, targetInterpreterId, 'new-request', requestPayload);
+
+        setTimeout(() => {
+          const room = getRoom(roomId);
+          // Room may already be gone (accepted, cancelled, or timed out via
+          // jobs/requestTimeouts.mjs) — only fall back if it's still pending.
+          if (!room || room.interpreterSocketId) return;
+
+          updateRoom(roomId, { preferredInterpreterId: null, preferredUntil: null });
+          io.to('interpreters').emit('new-request', requestPayload);
+          logger.info({ roomId, targetInterpreterId }, 'Preferred interpreter window expired — broadcasting to all');
+        }, PREFERRED_INTERPRETER_WINDOW_MS);
+      } else {
+        io.to('interpreters').emit('new-request', requestPayload);
+      }
 
       const interpreterSockets = await io.in('interpreters').fetchSockets();
       logger.info(
@@ -149,6 +198,7 @@ export function requestHandler(io, socket) {
           duration,
           category,
           interpreterName,
+          targetInterpreterId,
           interpretersOnline: interpreterSockets.length,
         },
         'Call requested — broadcast sent'

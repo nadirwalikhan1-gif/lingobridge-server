@@ -37,6 +37,24 @@ export function acceptHandler(io, socket) {
       return;
     }
 
+    // FIX: preference window — while active, this request was only actually
+    // sent to the client's selected interpreter (see requestHandler.mjs), so
+    // this should rarely trigger. Kept as defense-in-depth in case another
+    // interpreter learns of the room some other way (e.g. admin tooling)
+    // during the window.
+    if (
+      room.preferredInterpreterId &&
+      room.preferredUntil &&
+      Date.now() < room.preferredUntil &&
+      room.preferredInterpreterId !== interpreterId
+    ) {
+      socket.emit('error', {
+        code: 'PREFERRED_INTERPRETER_WINDOW',
+        message: 'This request is currently reserved for another interpreter.',
+      });
+      return;
+    }
+
     try {
       // Ensure interpreter has an earnings vault — upsert avoids race condition
       // when two concurrent accept events fire for the same interpreter.

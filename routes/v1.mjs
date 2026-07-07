@@ -487,17 +487,39 @@ router.get('/interpreters', requireAuth, async (req, res) => {
   try {
     const { language, category, sessionType } = req.query;
 
+    // FIX: was querying 'interpreter_profiles', which does not exist anywhere
+    // in this schema — every other part of the backend (interpreterRepo.mjs,
+    // admin.mjs, registerHandler.mjs) uses 'interpreters'. This endpoint has
+    // likely never returned real data, which is why the client booking flow
+    // ended up with a hardcoded interpreter list instead.
     let query = supabaseAdmin
-      .from('interpreter_profiles')
-      .select('*')
-      .eq('is_available', true);
+      .from('interpreters')
+      .select('user_id, languages, rating, price_per_minute, bio, is_verified, is_available, users(full_name, avatar_url)')
+      .eq('is_available', true)
+      .eq('is_verified', true);
 
     if (language) query = query.contains('languages', [language]);
-    if (category) query = query.contains('specializations', [category]);
+    // NOTE: no 'category'/'specializations' column exists on interpreters —
+    // category is a per-session attribute (see CategoryGrid.jsx), not a
+    // fixed per-interpreter specialty, so that filter is intentionally
+    // not applied here rather than silently faked.
 
-    const { data, error } = await query.limit(20);
+    const { data, error } = await query.order('rating', { ascending: false }).limit(20);
     if (error) throw error;
-    res.json({ interpreters: data || [] });
+
+    const interpreters = (data || []).map((i) => ({
+      id:         i.user_id,
+      name:       i.users?.full_name ?? 'Unknown',
+      avatar:     i.users?.avatar_url ?? null,
+      languages:  i.languages || [],
+      rating:     i.rating || 0,
+      bio:        i.bio || '',
+      verified:   i.is_verified,
+      online:     i.is_available,
+      ratePerMin: i.price_per_minute || null,
+    }));
+
+    res.json({ interpreters });
   } catch (err) {
     logger.error({ err }, 'Interpreters error');
     res.json({ interpreters: [] });
@@ -1203,8 +1225,8 @@ router.get('/interpreters/search', requireAuth, async (req, res) => {
     const { q, limit = 20 } = req.query;
 
     let query = supabaseAdmin
-      .from('interpreter_profiles')
-      .select('*, users!interpreter_profiles_user_id_fkey(full_name, avatar_url)')
+      .from('interpreters')
+      .select('user_id, languages, rating, is_verified, users(full_name, avatar_url)')
       .eq('is_available', true);
 
     const { data, error } = await query.limit(parseInt(limit) || 20);

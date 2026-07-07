@@ -15,6 +15,7 @@ const SCHEMAS = {
   duration:        (v) => v !== undefined && typeof v !== 'string' ? 'must be a string' : null,
   category:        (v) => v !== undefined && typeof v !== 'string' ? 'must be a string' : null,
   interpreterName: (v) => v !== undefined && typeof v !== 'string' ? 'must be a string' : null,
+  interpreterId:   (v) => v !== undefined && typeof v !== 'string' ? 'must be a string' : null,
 },
   'accept-call': {
     roomId: (v) => typeof v !== 'string' || !v.trim() ? 'must be a non-empty string' : null,
