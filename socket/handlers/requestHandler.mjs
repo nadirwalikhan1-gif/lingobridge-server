@@ -12,7 +12,13 @@ import { emitToUser } from '../../utils/socketUtils.mjs';
 import { logger } from '../../config/logger.mjs';
 
 // TEMP: set to true to disable wallet check for free call testing
-const FREE_CALL_TESTING = false;
+// FIX: was a hardcoded boolean literal in source — a financial-safety
+// bypass flag like this is exactly the kind of thing that's easy to flip
+// true for a local test and accidentally leave that way in a commit.
+// Reading from the environment means it can never be silently true in
+// production without an explicit, visible deploy-time config choice, and
+// defaults to disabled if the variable is unset entirely.
+const FREE_CALL_TESTING = process.env.FREE_CALL_TESTING === 'true';
 
 // FIX: when a client selects a specific interpreter, give that interpreter
 // this long to accept before silently opening the request to everyone else.

@@ -3,7 +3,7 @@
 import { logger } from '../../config/logger.mjs';
 import { endSession } from '../../services/billingService.mjs';
 import { sendSessionReceipt } from '../../services/receiptService.mjs';
-import { setInterpreterAvailability } from '../../db/interpreterRepo.mjs';
+import { setInterpreterAvailability, setInterpreterStatus } from '../../db/interpreterRepo.mjs';
 import { getRoom, deleteRoom, getRoomsForSocket } from '../runtime/sessionRuntime.mjs';
 import { rateLimitSocket } from '../../middleware/rateLimiter.mjs';
 import { validateEvent } from '../../middleware/validateEvent.mjs';
@@ -22,7 +22,21 @@ export function endCallHandler(io, socket) {
   socket.on('disconnect', async (reason) => {
     logger.info({ socketId: socket.id, userId: socket.userId, reason }, 'Socket disconnected');
     if (socket.interpreterRole) {
+      // FIX: previously only set is_available=false here — correct for
+      // matching safety (getAvailableInterpreters() already filters on
+      // is_available, so a disconnected interpreter was never routed new
+      // requests), but the separate 'status' column (what Dashboard.jsx /
+      // Availability.jsx actually display) was left untouched. An
+      // interpreter whose browser crashed or lost network would reopen
+      // their dashboard later and still see "Online", with no indication
+      // they'd actually been disconnected and unavailable the whole time.
       await setInterpreterAvailability(socket.userId, false).catch(() => {});
+      await setInterpreterStatus(socket.userId, 'offline').catch((err) =>
+        logger.warn({ err, userId: socket.userId }, 'setInterpreterStatus(offline) failed on disconnect')
+      );
+      if (socket.userId) {
+        io.to(`user:${socket.userId}`).emit('status-update', { status: 'offline' });
+      }
     }
     const roomIds = getRoomsForSocket(socket.id);
     for (const roomId of roomIds) {

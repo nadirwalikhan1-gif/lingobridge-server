@@ -134,23 +134,14 @@ export function requestHandler(io, socket) {
     logger.info({ socketId: socket.id, userId: socket.userId }, 'Interpreter came back online');
   });
 
-  // ── GO ON BREAK ───────────────────────────────────────────────
-  // Added to back the dashboard's three-state availability toggle
-  // (Online / Break / Offline). Leaves the 'interpreters' room same as
-  // offline (so no new requests are routed here), but persists a distinct
-  // 'break' status so the UI can show it differently from fully offline.
-  socket.on('go-on-break', async () => {
-    if (!socket.interpreterRole) return;
-
-    socket.leave('interpreters');
-
-    if (socket.userId) {
-      await setInterpreterStatus(socket.userId, 'break').catch((err) =>
-        logger.warn({ err, userId: socket.userId }, 'setInterpreterStatus(break) failed')
-      );
-    }
-
-    socket.emit('status-update', { status: 'break' });
-    logger.info({ socketId: socket.id, userId: socket.userId }, 'Interpreter went on break');
-  });
+  // GO ON BREAK: removed — platform decision is binary Online/Offline only
+  // (see features/interpreter/statusConfig.js). This handler was still
+  // fully live and reachable here despite neither Dashboard.jsx nor
+  // Availability.jsx ever emitting it, and used the old direct socket.emit
+  // rather than the per-user room broadcast (see 'go-online'/'go-offline'
+  // below) — genuinely dead code, not a working alternate path. Deleted
+  // rather than left as an unreachable trap for the next person who finds
+  // it. See migrations/20260709_remove_break_status.sql for the matching
+  // DB-level cleanup (backfills any legacy 'break' rows, tightens the
+  // status CHECK constraint).
 }

@@ -168,14 +168,20 @@ export async function updateInterpreterProfile(userId, updates) {
 }
 
 /**
- * Set the three-state interpreter status (online / break / offline).
+ * Set interpreter status (online / offline).
  * Keeps is_available in sync for backward compatibility with existing
- * matching/request-routing logic, which only ever checks is_available —
- * 'break' is treated as unavailable for matching purposes, same as offline,
- * but tracked distinctly here for the dashboard's three-state UI.
+ * matching/request-routing logic, which only ever checks is_available.
+ *
+ * FIX: was documented as three-state (online/break/offline), but 'break'
+ * was never actually reachable from the current UI (see
+ * statusConfig.js — Dashboard.jsx / Availability.jsx only ever emit
+ * go-online/go-offline) and the socket handler that set it has been
+ * removed (see registerHandler.mjs). See
+ * migrations/20260709_remove_break_status.sql for the matching backfill
+ * and CHECK constraint tightening.
  */
 export async function setInterpreterStatus(userId, status) {
-  if (!['online', 'break', 'offline'].includes(status)) {
+  if (!['online', 'offline'].includes(status)) {
     throw new Error(`Invalid interpreter status: ${status}`);
   }
 
