@@ -742,12 +742,25 @@ router.post('/teams/me/invitations', requireAuth, async (req, res) => {
 // DELETE /v1/teams/me/members/:id
 router.delete('/teams/me/members/:id', requireAuth, async (req, res) => {
   try {
-    const { error } = await supabaseAdmin
+    // FIX (IDOR): previously deleted by id alone, with no check that the
+    // target member belonged to the caller's own team — any authenticated
+    // user who obtained another team's member id could delete it. Scoped to
+    // team_id now, matching the pattern already used correctly elsewhere in
+    // this file (see POST /teams/me/invitations above).
+    const team = await getUserTeam(req.user.id);
+
+    const { data, error } = await supabaseAdmin
       .from('team_members')
       .delete()
-      .eq('id', req.params.id);
+      .eq('id', req.params.id)
+      .eq('team_id', team.id)
+      .select();
 
     if (error) throw error;
+    if (!data || data.length === 0) {
+      return res.status(404).json({ error: 'Member not found in your team' });
+    }
+
     res.json({ success: true });
   } catch (err) {
     logger.error({ err }, 'Remove member error');
@@ -758,15 +771,24 @@ router.delete('/teams/me/members/:id', requireAuth, async (req, res) => {
 // PUT /v1/teams/me/members/:id/role
 router.put('/teams/me/members/:id/role', requireAuth, async (req, res) => {
   try {
+    // FIX (IDOR): same class of bug as DELETE above — scoped to the
+    // caller's own team so role changes can't reach another team's members.
     const { role } = req.body;
+    const team = await getUserTeam(req.user.id);
+
     const { data, error } = await supabaseAdmin
       .from('team_members')
       .update({ role })
       .eq('id', req.params.id)
+      .eq('team_id', team.id)
       .select()
-      .single();
+      .maybeSingle();
 
     if (error) throw error;
+    if (!data) {
+      return res.status(404).json({ error: 'Member not found in your team' });
+    }
+
     res.json({ member: data });
   } catch (err) {
     logger.error({ err }, 'Role update error');
@@ -777,15 +799,24 @@ router.put('/teams/me/members/:id/role', requireAuth, async (req, res) => {
 // PUT /v1/teams/me/members/:id/department
 router.put('/teams/me/members/:id/department', requireAuth, async (req, res) => {
   try {
+    // FIX (IDOR): same class of bug as DELETE above — scoped to the
+    // caller's own team.
     const { department } = req.body;
+    const team = await getUserTeam(req.user.id);
+
     const { data, error } = await supabaseAdmin
       .from('team_members')
       .update({ department })
       .eq('id', req.params.id)
+      .eq('team_id', team.id)
       .select()
-      .single();
+      .maybeSingle();
 
     if (error) throw error;
+    if (!data) {
+      return res.status(404).json({ error: 'Member not found in your team' });
+    }
+
     res.json({ member: data });
   } catch (err) {
     logger.error({ err }, 'Department update error');
@@ -796,16 +827,26 @@ router.put('/teams/me/members/:id/department', requireAuth, async (req, res) => 
 // POST /v1/teams/me/invitations/:id/resend
 router.post('/teams/me/invitations/:id/resend', requireAuth, async (req, res) => {
   try {
+    // FIX (IDOR): same class of bug as DELETE above — scoped to the
+    // caller's own team so invitations can't be resent/extended for a
+    // different team's pending invite.
+    const team = await getUserTeam(req.user.id);
+
     const { data, error } = await supabaseAdmin
       .from('team_invitations')
       .update({
         expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
       })
       .eq('id', req.params.id)
+      .eq('team_id', team.id)
       .select()
-      .single();
+      .maybeSingle();
 
     if (error) throw error;
+    if (!data) {
+      return res.status(404).json({ error: 'Invitation not found in your team' });
+    }
+
     res.json({ invitation: data });
   } catch (err) {
     logger.error({ err }, 'Resend invite error');
