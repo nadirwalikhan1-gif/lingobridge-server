@@ -10,6 +10,8 @@ export async function createSession(data) {
     .insert({
       client_id:          data.clientId,
       language:           data.language,
+      // FIX: was never stored at all — see migrations/20260709_sessions_to_language.sql
+      to_language:        data.toLang || null,
       purpose:            data.purpose,
       session_type:       data.sessionType,
       currency:           data.currency,

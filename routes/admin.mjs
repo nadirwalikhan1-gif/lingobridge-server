@@ -1,6 +1,8 @@
 // routes/admin.mjs
 import { Router } from 'express';
 import { supabaseAdmin, verifySupabaseToken } from '../config/supabase.mjs';
+import { creditWallet } from '../db/walletRepo.mjs';
+import { insertTransaction } from '../db/transactionRepo.mjs';
 import { logger } from '../config/logger.mjs';
 
 const router = Router();
@@ -39,24 +41,64 @@ router.get('/users', requireAdmin, async (req, res) => {
       .limit(100);
     if (error) throw error;
 
-    const { data: sessionCounts } = await supabaseAdmin
+    // FIX: role/status were never queried at all — role was hardcoded to
+    // 'client' for every user (interpreters and admins included). Real role
+    // lives on the Supabase Auth user, not the public users table (same
+    // place authHttp.mjs/authSocket.mjs read it from for actual
+    // authorization) — same for 'status', which /users/:id/approve above
+    // already writes to but this endpoint never read back.
+    const { data: authList } = await supabaseAdmin.auth.admin.listUsers({ perPage: 1000 });
+    const roleMap = {};
+    const statusMap = {};
+    (authList?.users || []).forEach((au) => {
+      roleMap[au.id]   = au.app_metadata?.role || au.user_metadata?.role || 'client';
+      statusMap[au.id] = au.user_metadata?.status || 'active';
+    });
+
+    // FIX: session counts were always keyed by client_id, silently counting
+    // 0 sessions for every interpreter (consistent with role being
+    // hardcoded to 'client' everywhere). Now counts against the correct
+    // column for each user's real role.
+    const { data: sessions } = await supabaseAdmin
       .from('sessions')
-      .select('client_id');
+      .select('client_id, interpreter_id');
 
-    const countMap = {};
-    (sessionCounts || []).forEach(s => { countMap[s.client_id] = (countMap[s.client_id] || 0) + 1; });
+    const clientCountMap = {};
+    const interpreterCountMap = {};
+    (sessions || []).forEach((s) => {
+      if (s.client_id)      clientCountMap[s.client_id] = (clientCountMap[s.client_id] || 0) + 1;
+      if (s.interpreter_id) interpreterCountMap[s.interpreter_id] = (interpreterCountMap[s.interpreter_id] || 0) + 1;
+    });
 
-    res.json((users || []).map(u => ({
-      id:       u.id,
-      name:     u.full_name || 'Unknown',
-      email:    u.email,
-      initials: initials(u.full_name),
-      role:     'client',
-      status:   'active',
-      joined:   new Date(u.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-      sessions: countMap[u.id] || 0,
-      spent:    '$0.00',
-    })));
+    // FIX: 'spent' was hardcoded to '$0.00' for every user. Real spend is
+    // the sum of that user's client-vault transactions (see the real
+    // per-tick ledger entries created in billingService.mjs).
+    const { data: clientTxns } = await supabaseAdmin
+      .from('transactions')
+      .select('user_id, amount')
+      .eq('vault_type', 'client');
+
+    const spentMap = {};
+    (clientTxns || []).forEach((t) => {
+      spentMap[t.user_id] = (spentMap[t.user_id] || 0) + Math.abs(t.amount || 0);
+    });
+
+    res.json((users || []).map(u => {
+      const role = roleMap[u.id] || 'client';
+      return {
+        id:       u.id,
+        name:     u.full_name || 'Unknown',
+        email:    u.email,
+        initials: initials(u.full_name),
+        role,
+        status:   statusMap[u.id] || 'active',
+        joined:   new Date(u.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+        sessions: role === 'interpreter' ? (interpreterCountMap[u.id] || 0) : (clientCountMap[u.id] || 0),
+        // Spend only applies to clients — interpreters earn, they don't
+        // spend, so this is genuinely not applicable rather than $0.00.
+        spent:    role === 'client' ? `$${(spentMap[u.id] || 0).toFixed(2)}` : null,
+      };
+    }));
   } catch (err) {
     logger.error({ err }, 'Admin users error');
     res.status(500).json({ error: 'Failed to load users' });
@@ -141,13 +183,23 @@ router.get('/sessions', requireAdmin, async (req, res) => {
   escalated: 'escalated', flagged: 'escalated',
   completed: 'completed', ended: 'completed',
 }
-const rawStatus = STATUS_MAP[s.status] ?? 'live'
+// FIX: unrecognized statuses (e.g. 'pending', 'cancelled', 'timeout') were
+// falling back to 'live' — actively misleading, since it implies an active
+// call needing attention when the session may not even be running.
+// 'completed' is a safer default: not urgent, not implying a live call.
+const rawStatus = STATUS_MAP[s.status] ?? 'completed'
 
       return {
         id:                  s.id,
         status:              rawStatus,
+        // FIX: toLang was set to the same value as fromLang (both read
+        // s.language) — the sessions table never actually stored the
+        // interpretation target language at all. Now reads the real
+        // column added in migrations/20260709_sessions_to_language.sql.
+        // Sessions created before that migration will show '—' for toLang,
+        // since that history genuinely wasn't captured.
         fromLang:            s.language || 'EN',
-        toLang:              s.language || 'EN',
+        toLang:              s.to_language || '—',
         category:            s.purpose || 'General',
         interpreter:         s.interpreter?.full_name || 'Unassigned',
         interpreterInitials: initials(s.interpreter?.full_name),
@@ -175,29 +227,73 @@ router.get('/transactions/export', requireAdmin, async (req, res) => {
 
 router.get('/transactions', requireAdmin, async (req, res) => {
   try {
-    const { data, error } = await supabaseAdmin
+    // FIX: previously showed every transactions row (client charges,
+    // interpreter earnings, and platform revenue rows all mixed together
+    // with no vault_type filter — platform/interpreter rows use a sentinel
+    // PLATFORM_VAULT_ID with no matching users row, so they rendered as
+    // "Unknown"), and fabricated platform/net as a flat guessed 10% split
+    // with type hardcoded to 'audio' and interpreter hardcoded to the
+    // literal string 'Interpreter' for every row.
+    //
+    // billingService.mjs actually records three REAL, separate ledger
+    // entries per billing tick (client charge / interpreter earning /
+    // platform revenue), all sharing the same session_id. This now uses the
+    // client charge as the primary row and pulls the real platform fee and
+    // interpreter net from the matching sibling entries for that same
+    // session, instead of guessing a split.
+    const { data: clientTxns, error } = await supabaseAdmin
       .from('transactions')
-      .select('*, users(full_name)')
+      .select('*, users(full_name), sessions(session_type, interpreter:users!sessions_interpreter_id_fkey(full_name))')
+      .eq('vault_type', 'client')
       .order('created_at', { ascending: false })
       .limit(50);
     if (error) throw error;
 
-    res.json((data || []).map(t => ({
-      id:          t.id,
-      amount:      Math.abs(t.amount || 0),
-      platform:    parseFloat((Math.abs(t.amount || 0) * 0.1).toFixed(2)),
-      net:         parseFloat((Math.abs(t.amount || 0) * 0.9).toFixed(2)),
-      status:      t.status || 'completed',
-      type:        'audio',
-      category:    t.description || 'Session',
-      client:      t.users?.full_name || 'Unknown',
-      clientInit:  initials(t.users?.full_name),
-      interpreter: 'Interpreter',
-      interpInit:  'IN',
-      ref:         `TXN-${String(t.id).slice(0, 8).toUpperCase()}`,
-      date:        new Date(t.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-      currency:    t.currency || 'USD',
-    })));
+    const sessionIds = [...new Set((clientTxns || []).map(t => t.session_id).filter(Boolean))];
+
+    const { data: siblingTxns } = sessionIds.length
+      ? await supabaseAdmin
+          .from('transactions')
+          .select('session_id, vault_type, amount, created_at')
+          .in('session_id', sessionIds)
+          .in('vault_type', ['platform', 'interpreter'])
+      : { data: [] };
+
+    // Multiple billing ticks can share a session_id, so pick the sibling
+    // entry closest in time to this specific charge rather than any match.
+    const closestSibling = (t, vaultType) => {
+      const candidates = (siblingTxns || []).filter(
+        (s) => s.session_id === t.session_id && s.vault_type === vaultType
+      );
+      if (!candidates.length) return null;
+      const targetTime = new Date(t.created_at).getTime();
+      return candidates.reduce((best, cur) =>
+        Math.abs(new Date(cur.created_at).getTime() - targetTime) <
+        Math.abs(new Date(best.created_at).getTime() - targetTime) ? cur : best
+      );
+    };
+
+    res.json((clientTxns || []).map((t) => {
+      const platformTxn    = closestSibling(t, 'platform');
+      const interpreterTxn = closestSibling(t, 'interpreter');
+
+      return {
+        id:          t.id,
+        amount:      Math.abs(t.amount || 0),
+        platform:    platformTxn    ? Math.abs(platformTxn.amount)    : null,
+        net:         interpreterTxn ? Math.abs(interpreterTxn.amount) : null,
+        status:      t.status || 'completed',
+        type:        t.sessions?.session_type || 'audio',
+        category:    t.description || 'Session',
+        client:      t.users?.full_name || 'Unknown',
+        clientInit:  initials(t.users?.full_name),
+        interpreter: t.sessions?.interpreter?.full_name || 'Unassigned',
+        interpInit:  initials(t.sessions?.interpreter?.full_name),
+        ref:         `TXN-${String(t.id).slice(0, 8).toUpperCase()}`,
+        date:        new Date(t.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+        currency:    t.currency || 'USD',
+      };
+    }));
   } catch (err) {
     logger.error({ err }, 'Admin transactions error');
     res.status(500).json({ error: 'Failed to load transactions' });
@@ -273,11 +369,77 @@ router.get('/disputes', requireAdmin, async (req, res) => {
 
 router.post('/disputes/:id/resolve', requireAdmin, async (req, res) => {
   try {
-    const { action } = req.body;
-    const status = action === 'refund' ? 'resolved' : 'resolved';
-    await supabaseAdmin.from('disputes').update({ status }).eq('id', req.params.id);
-    res.json({ success: true });
+    // FIX: two real bugs here.
+    // 1. `action === 'refund' ? 'resolved' : 'resolved'` — both branches
+    //    produced the identical status, so 'action' had no actual effect.
+    //    'resolution' (a separate column, already selected in GET
+    //    /disputes above) is where the refund-vs-denied outcome belongs —
+    //    'status' correctly stays 'resolved' either way, since both
+    //    conclude the dispute.
+    // 2. Choosing "Refund" only ever updated a status label — no money
+    //    actually moved. This now credits the client's wallet for real via
+    //    creditWallet() and records a proper transactions ledger entry,
+    //    with a guard against double-crediting if a dispute is resolved
+    //    more than once.
+    const { action, notes } = req.body;
+    if (!['refund', 'deny'].includes(action)) {
+      return res.status(400).json({ error: 'action must be "refund" or "deny"' });
+    }
+
+    const { data: dispute, error: fetchErr } = await supabaseAdmin
+      .from('disputes')
+      .select('id, session_id, client_id, status')
+      .eq('id', req.params.id)
+      .single();
+    if (fetchErr || !dispute) {
+      return res.status(404).json({ error: 'Dispute not found' });
+    }
+    if (dispute.status === 'resolved') {
+      return res.status(409).json({ error: 'This dispute has already been resolved' });
+    }
+
+    let refundAmount = null;
+
+    if (action === 'refund') {
+      // Real refund amount: what the client was actually charged for this
+      // session (sum of their client-vault transactions), not a guess.
+      const { data: charges } = await supabaseAdmin
+        .from('transactions')
+        .select('amount')
+        .eq('session_id', dispute.session_id)
+        .eq('vault_type', 'client');
+
+      refundAmount = (charges || []).reduce((sum, t) => sum + Math.abs(t.amount || 0), 0);
+
+      if (refundAmount > 0) {
+        await creditWallet(dispute.client_id, refundAmount, 'client');
+        await insertTransaction({
+          userId:      dispute.client_id,
+          amount:      refundAmount,
+          currency:    'USD',
+          type:        'refund',
+          description: 'Dispute resolution refund',
+          sessionId:   dispute.session_id,
+          referenceId: dispute.id,
+          vaultType:   'client',
+        });
+      }
+    }
+
+    const { error: updateErr } = await supabaseAdmin
+      .from('disputes')
+      .update({
+        status:      'resolved',
+        resolution:  action === 'refund' ? 'refund' : 'denied',
+        admin_notes: notes ?? null,
+        updated_at:  new Date().toISOString(),
+      })
+      .eq('id', req.params.id);
+    if (updateErr) throw updateErr;
+
+    res.json({ success: true, refunded: refundAmount });
   } catch (err) {
+    logger.error({ err }, 'Dispute resolve error');
     res.status(500).json({ error: 'Failed to resolve dispute' });
   }
 });
@@ -285,9 +447,12 @@ router.post('/disputes/:id/resolve', requireAdmin, async (req, res) => {
 // ── Reviews ───────────────────────────────────────────────────────────────────
 router.get('/reviews', requireAdmin, async (req, res) => {
   try {
+    // FIX: was hardcoding interpreter: 'Interpreter' / interpInit: 'IN' for
+    // every row. Joins through sessions to the real interpreter, same
+    // pattern already used correctly in GET /sessions below.
     const { data, error } = await supabaseAdmin
       .from('session_ratings')
-      .select('*, users!session_ratings_rated_by_fkey(full_name), sessions(language)')
+      .select('*, users!session_ratings_rated_by_fkey(full_name), sessions(language, interpreter:users!sessions_interpreter_id_fkey(full_name))')
       .order('created_at', { ascending: false })
       .limit(50);
     if (error) throw error;
@@ -299,8 +464,8 @@ router.get('/reviews', requireAdmin, async (req, res) => {
       flagged:     r.flagged || false,
       client:      r.users?.full_name || 'Unknown',
       clientInit:  initials(r.users?.full_name),
-      interpreter: 'Interpreter',
-      interpInit:  'IN',
+      interpreter: r.sessions?.interpreter?.full_name || 'Unknown',
+      interpInit:  initials(r.sessions?.interpreter?.full_name),
       category:    r.sessions?.language || 'General',
       date:        new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
     })));

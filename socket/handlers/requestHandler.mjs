@@ -99,6 +99,7 @@ export function requestHandler(io, socket) {
       const session = await createSession({
         clientId:       userId,
         language:       fromLang ?? language,
+        toLang,         // FIX: was never passed through — see migrations/20260709_sessions_to_language.sql
         purpose:        category ?? 'general',
         sessionType,
         currency:       wallet.currency ?? 'USD',
