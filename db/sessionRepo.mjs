@@ -57,6 +57,22 @@ export async function getActiveSessionByChannel(channelName) {
 }
 
 /**
+ * Get a session by Agora channel name, regardless of status. Used to verify
+ * Agora token requesters are real participants — deliberately not scoped to
+ * 'active' (unlike getActiveSessionByChannel above) since a client needs a
+ * valid token before an interpreter has accepted (status still 'pending').
+ */
+export async function getSessionByChannel(channelName) {
+  const { data } = await supabaseAdmin
+    .from('sessions')
+    .select('id, client_id, interpreter_id, status')
+    .eq('agora_channel', channelName)
+    .maybeSingle();
+
+  return data || null;
+}
+
+/**
  * Update session status with optional extra fields.
  */
 export async function updateSessionStatus(sessionId, status, extra = {}) {
