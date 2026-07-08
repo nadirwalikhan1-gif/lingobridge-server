@@ -36,6 +36,36 @@ export function updateRoom(roomId, updates) {
   }
 }
 
+// FIX: double-booking race — claimRoom() does the "is it taken?" check and
+// the "claim it" write as a single synchronous operation (safe by virtue of
+// JS's single-threaded event loop: nothing else can run between the check
+// and the set within one function call, unlike the previous pattern of
+// checking via getRoom() and only claiming after a chain of awaits, which
+// left a real window for two concurrent accept-call events to both pass the
+// check). This is a same-process fast path only — see the multi-instance
+// note at the top of this file — the authoritative guard against races
+// across instances is the DB-level claimSessionForInterpreter() in
+// sessionRepo.mjs, which acceptHandler.mjs also checks.
+export function claimRoom(roomId, socketId, interpreterUserId) {
+  const room = rooms.get(roomId);
+  if (!room || room.interpreterSocketId) return false;
+  room.interpreterSocketId = socketId;
+  room.interpreterUserId = interpreterUserId;
+  _trackSocket(socketId, roomId);
+  return true;
+}
+
+// Releases a claim made by claimRoom() above — used when the DB-level claim
+// in acceptHandler.mjs subsequently fails, so the room can still be won by
+// someone else instead of being stuck falsely "taken" forever.
+export function releaseClaim(roomId, socketId) {
+  const room = rooms.get(roomId);
+  if (!room || room.interpreterSocketId !== socketId) return;
+  room.interpreterSocketId = null;
+  room.interpreterUserId = null;
+  _untrackSocket(socketId, roomId);
+}
+
 export function deleteRoom(roomId) {
   const room = rooms.get(roomId);
   if (!room) return;

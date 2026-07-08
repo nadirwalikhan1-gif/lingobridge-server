@@ -99,6 +99,38 @@ export async function activateSession(sessionId, interpreterId) {
 }
 
 /**
+ * Atomically claim a session for an interpreter — used by acceptHandler.mjs
+ * instead of activateSession() above.
+ *
+ * FIX: double-booking race. activateSession()'s plain
+ * .update(...).eq('id', sessionId) has no guard clause, so two concurrent
+ * accept-call events could both write interpreter_id, whichever ran last
+ * silently winning even after the first had already told its interpreter
+ * "you're in." The .is('interpreter_id', null) clause here makes the write
+ * conditional at the database level — Postgres's own row locking makes this
+ * genuinely atomic, including across multiple server instances (unlike the
+ * in-memory claimRoom() in sessionRuntime.mjs, which is same-process only).
+ * Returns the updated row, or null if someone else claimed it first.
+ */
+export async function claimSessionForInterpreter(sessionId, interpreterId) {
+  const { data, error } = await supabaseAdmin
+    .from('sessions')
+    .update({
+      status:         'active',
+      interpreter_id: interpreterId,
+      started_at:     new Date().toISOString(),
+      last_billed_at: new Date().toISOString(),
+    })
+    .eq('id', sessionId)
+    .is('interpreter_id', null)
+    .select()
+    .maybeSingle();
+
+  if (error) throw new Error(`Session claim failed: ${error.message}`);
+  return data; // null means someone else already claimed this session
+}
+
+/**
  * Update last_billed_at (legacy heartbeat).
  */
 export async function updateLastBilledAt(sessionId) {

@@ -1,7 +1,7 @@
 import { validateEvent } from '../../middleware/validateEvent.mjs';
 import { rateLimitSocket } from '../../middleware/rateLimiter.mjs';
-import { getRoom, updateRoom, deleteRoom } from '../runtime/sessionRuntime.mjs';
-import { activateSession, updateSessionStatus } from '../../db/sessionRepo.mjs';
+import { getRoom, updateRoom, deleteRoom, claimRoom, releaseClaim } from '../runtime/sessionRuntime.mjs';
+import { claimSessionForInterpreter, updateSessionStatus } from '../../db/sessionRepo.mjs';
 import { releaseReservation } from '../../db/walletRepo.mjs';
 import { supabaseAdmin } from '../../config/supabase.mjs';
 import { generateAgoraToken } from '../../services/agoraService.mjs';
@@ -32,6 +32,8 @@ export function acceptHandler(io, socket) {
       return;
     }
 
+    // Cheap early exit for the common case — not the actual atomicity
+    // guarantee (see claimRoom() below, which does the real check-and-set).
     if (room.interpreterSocketId) {
       socket.emit('error', { code: 'ROOM_TAKEN', message: 'Room already accepted by another interpreter' });
       return;
@@ -55,7 +57,34 @@ export function acceptHandler(io, socket) {
       return;
     }
 
+    // FIX: double-booking race. Previously getRoom() (a read) was checked
+    // here, but the actual claim (updateRoom(...) setting interpreterSocketId)
+    // only happened after a whole chain of awaits below (wallet upsert,
+    // activateSession) — leaving a real window where two concurrent
+    // accept-call events could both read "not yet taken" and both proceed.
+    // claimRoom() below does the check-and-set as one synchronous operation
+    // immediately, before any async work starts, so nothing can interleave.
+    if (!claimRoom(roomId, socket.id, interpreterId)) {
+      socket.emit('error', { code: 'ROOM_TAKEN', message: 'Room already accepted by another interpreter' });
+      return;
+    }
+
     try {
+      // Authoritative guard — claimRoom() above only protects against races
+      // within this same server process (see sessionRuntime.mjs's
+      // multi-instance note). This DB-level compare-and-swap via
+      // .is('interpreter_id', null) is what actually guarantees correctness,
+      // including across multiple instances if this is ever scaled out.
+      const claimed = await claimSessionForInterpreter(room.sessionId, interpreterId);
+      if (!claimed) {
+        // Someone else won it first (a different instance, or a request
+        // that reached the DB before this one) — release our in-memory
+        // claim so the room doesn't stay falsely "taken" on this process.
+        releaseClaim(roomId, socket.id);
+        socket.emit('error', { code: 'ROOM_TAKEN', message: 'Room already accepted by another interpreter' });
+        return;
+      }
+
       // Ensure interpreter has an earnings vault — upsert avoids race condition
       // when two concurrent accept events fire for the same interpreter.
       await supabaseAdmin
@@ -65,8 +94,6 @@ export function acceptHandler(io, socket) {
           { onConflict: 'user_id,vault_type', ignoreDuplicates: true }
         );
 
-      await activateSession(room.sessionId, interpreterId);
-      updateRoom(roomId, { interpreterSocketId: socket.id, interpreterUserId: interpreterId });
       socket.join(roomId);
 
       const channelName = room.channelName ?? roomId;
