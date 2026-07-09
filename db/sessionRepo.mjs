@@ -133,6 +133,32 @@ export async function claimSessionForInterpreter(sessionId, interpreterId) {
 }
 
 /**
+ * Reverts a successful claimSessionForInterpreter() call — used by
+ * acceptHandler.mjs if something fails after the claim succeeds but before
+ * the call is actually fully set up (e.g. the interpreter wallet upsert
+ * throws). Without this, that session would be permanently stuck: the DB
+ * claim's own .is('interpreter_id', null) guard means no one — including
+ * retrying the same interpreter — could ever accept it again, while the
+ * client never received call-accepted at all. Scoped to interpreter_id
+ * matching the caller, so it can't accidentally revert a different,
+ * legitimately-succeeded claim.
+ */
+export async function unclaimSession(sessionId, interpreterId) {
+  const { error } = await supabaseAdmin
+    .from('sessions')
+    .update({
+      status:         'pending',
+      interpreter_id: null,
+      started_at:     null,
+      last_billed_at: null,
+    })
+    .eq('id', sessionId)
+    .eq('interpreter_id', interpreterId);
+
+  if (error) throw new Error(`Session unclaim failed: ${error.message}`);
+}
+
+/**
  * Update last_billed_at (legacy heartbeat).
  */
 export async function updateLastBilledAt(sessionId) {

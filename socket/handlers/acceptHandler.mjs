@@ -1,7 +1,7 @@
 import { validateEvent } from '../../middleware/validateEvent.mjs';
 import { rateLimitSocket } from '../../middleware/rateLimiter.mjs';
 import { getRoom, updateRoom, deleteRoom, claimRoom, releaseClaim } from '../runtime/sessionRuntime.mjs';
-import { claimSessionForInterpreter, updateSessionStatus } from '../../db/sessionRepo.mjs';
+import { claimSessionForInterpreter, unclaimSession, updateSessionStatus } from '../../db/sessionRepo.mjs';
 import { releaseReservation } from '../../db/walletRepo.mjs';
 import { supabaseAdmin } from '../../config/supabase.mjs';
 import { generateAgoraToken } from '../../services/agoraService.mjs';
@@ -85,73 +85,92 @@ export function acceptHandler(io, socket) {
         return;
       }
 
-      // Ensure interpreter has an earnings vault — upsert avoids race condition
-      // when two concurrent accept events fire for the same interpreter.
-      await supabaseAdmin
-        .from('wallets')
-        .upsert(
-          { user_id: interpreterId, vault_type: 'interpreter', balance: 0, currency: 'USD', reserved_balance: 0 },
-          { onConflict: 'user_id,vault_type', ignoreDuplicates: true }
-        );
-
-      socket.join(roomId);
-
-      const channelName = room.channelName ?? roomId;
-      const sessionType = room.requestData?.sessionType;
-      if (!sessionType) {
-        logger.warn({ roomId }, 'sessionType missing from requestData — defaulting to audio');
-      }
-      const resolvedSessionType = sessionType ?? 'audio';
-
-      let clientToken = null;
-      let interpreterToken = null;
+      // FIX: everything from here through the client's call-accepted emit
+      // runs after the session is already claimed. Previously, a failure
+      // anywhere in this section (e.g. the wallet upsert below) fell
+      // through to the outer catch, which logs and tells the interpreter
+      // "failed" — but never reverted the claim. Since
+      // claimSessionForInterpreter's guard is interpreter_id IS NULL, that
+      // left the session permanently unacceptable by anyone, ever, while
+      // the client never received call-accepted at all. This inner
+      // try/catch rolls the claim back on any failure here, so the room
+      // becomes available again instead of silently dying.
       try {
-        const [clientResult, interpreterResult] = await Promise.all([
-          generateAgoraToken(channelName),
-          generateAgoraToken(channelName),
-        ]);
-        clientToken = clientResult.token;
-        interpreterToken = interpreterResult.token;
-      } catch (e) {
-        logger.warn({ e }, 'Agora token generation failed on accept — parties will retry');
+        // Ensure interpreter has an earnings vault — upsert avoids race condition
+        // when two concurrent accept events fire for the same interpreter.
+        await supabaseAdmin
+          .from('wallets')
+          .upsert(
+            { user_id: interpreterId, vault_type: 'interpreter', balance: 0, currency: 'USD', reserved_balance: 0 },
+            { onConflict: 'user_id,vault_type', ignoreDuplicates: true }
+          );
+
+        socket.join(roomId);
+
+        const channelName = room.channelName ?? roomId;
+        const sessionType = room.requestData?.sessionType;
+        if (!sessionType) {
+          logger.warn({ roomId }, 'sessionType missing from requestData — defaulting to audio');
+        }
+        const resolvedSessionType = sessionType ?? 'audio';
+
+        let clientToken = null;
+        let interpreterToken = null;
+        try {
+          const [clientResult, interpreterResult] = await Promise.all([
+            generateAgoraToken(channelName),
+            generateAgoraToken(channelName),
+          ]);
+          clientToken = clientResult.token;
+          interpreterToken = interpreterResult.token;
+        } catch (e) {
+          logger.warn({ e }, 'Agora token generation failed on accept — parties will retry');
+        }
+
+        // FIX: resolve clientName from room data (was undefined variable)
+        const clientName = room.requestData?.clientName 
+          || room.clientUserId?.split('@')[0] 
+          || 'Client';
+
+        io.to(room.clientSocketId).emit('call-accepted', {
+          roomId,
+          interpreterId,
+          sessionId:   room.sessionId,
+          channelName,
+          agoraToken:  clientToken,
+          sessionType: resolvedSessionType,
+        });
+
+        socket.emit('call-accepted', {
+          roomId,
+          clientId:    room.clientUserId,
+          sessionId:   room.sessionId,
+          channelName,
+          agoraToken:  interpreterToken,
+          sessionType: resolvedSessionType,
+          clientName,  // FIX: was `clientName,clientName` — duplicate undefined
+        });
+
+        socket.to('interpreters').emit('request-cancelled', { roomId });
+
+        io.to('admins').emit('call-accepted', {
+          roomId,
+          interpreterId,
+          clientId:    room.clientUserId,
+          sessionId:   room.sessionId,
+          channelName,
+          sessionType: resolvedSessionType,
+        });
+
+        logger.info({ roomId, interpreterId, clientId: room.clientUserId, sessionType: resolvedSessionType }, 'Call accepted');
+      } catch (postClaimErr) {
+        logger.error({ err: postClaimErr, roomId, interpreterId }, 'accept-call failed after claim — rolling back');
+        await unclaimSession(room.sessionId, interpreterId).catch((rollbackErr) =>
+          logger.error({ err: rollbackErr, roomId, interpreterId }, 'Rollback of session claim also failed — may need manual DB fix')
+        );
+        releaseClaim(roomId, socket.id);
+        socket.emit('error', { code: 'SERVER_ERROR', message: 'Failed to accept call — please try again' });
       }
-
-      // FIX: resolve clientName from room data (was undefined variable)
-      const clientName = room.requestData?.clientName 
-        || room.clientUserId?.split('@')[0] 
-        || 'Client';
-
-      io.to(room.clientSocketId).emit('call-accepted', {
-        roomId,
-        interpreterId,
-        sessionId:   room.sessionId,
-        channelName,
-        agoraToken:  clientToken,
-        sessionType: resolvedSessionType,
-      });
-
-      socket.emit('call-accepted', {
-        roomId,
-        clientId:    room.clientUserId,
-        sessionId:   room.sessionId,
-        channelName,
-        agoraToken:  interpreterToken,
-        sessionType: resolvedSessionType,
-        clientName,  // FIX: was `clientName,clientName` — duplicate undefined
-      });
-
-      socket.to('interpreters').emit('request-cancelled', { roomId });
-
-      io.to('admins').emit('call-accepted', {
-        roomId,
-        interpreterId,
-        clientId:    room.clientUserId,
-        sessionId:   room.sessionId,
-        channelName,
-        sessionType: resolvedSessionType,
-      });
-
-      logger.info({ roomId, interpreterId, clientId: room.clientUserId, sessionType: resolvedSessionType }, 'Call accepted');
     } catch (err) {
       logger.error({ err, roomId, interpreterId }, 'accept-call failed');
       socket.emit('error', { code: 'SERVER_ERROR', message: 'Failed to accept call' });
