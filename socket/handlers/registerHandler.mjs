@@ -21,6 +21,27 @@ export function requestHandler(io, socket) {
       socket.interpreterRole = true;
 
       if (socket.userId) {
+        // FIX: no code path anywhere in this backend ever INSERTs a row into
+        // interpreters — every existing function (setInterpreterAvailability,
+        // setInterpreterStatus, etc.) only ever UPDATEs an existing row,
+        // which silently affects zero rows if one doesn't exist yet. This is
+        // exactly the "missing interpreters row" bug fixed manually via SQL
+        // for one legacy test account earlier in this project — without this,
+        // it would recur for every genuinely new interpreter signup. Defaults
+        // to is_verified: false / is_available: false — a new interpreter
+        // shouldn't be bookable until an admin actually verifies them (see
+        // POST /v1/admin/users/:id/approve), matching the real vetting the
+        // product's "Background checked" claim implies.
+        const { error: profileErr } = await supabaseAdmin
+          .from('interpreters')
+          .upsert(
+            { user_id: socket.userId, is_available: false, is_verified: false, status: 'offline' },
+            { onConflict: 'user_id', ignoreDuplicates: true }
+          );
+        if (profileErr) {
+          logger.error({ err: profileErr, userId: socket.userId }, 'Failed to create interpreter profile row');
+        }
+
         // FIX: 'register' is ALSO auto-emitted by lib/socket.js on every
         // single connect/reconnect (page nav, tab refocus, network blip) —
         // completely separate from a deliberate "go online" click. It must
