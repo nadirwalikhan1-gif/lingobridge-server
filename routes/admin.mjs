@@ -86,14 +86,15 @@ router.get('/users', requireAdmin, async (req, res) => {
     res.json((users || []).map(u => {
       const role = roleMap[u.id] || 'client';
       return {
-        id:       u.id,
-        name:     u.full_name || 'Unknown',
-        email:    u.email,
-        initials: initials(u.full_name),
+        id:        u.id,
+        name:      u.full_name || 'Unknown',
+        email:     u.email,
+        initials:  initials(u.full_name),
         role,
-        status:   statusMap[u.id] || 'active',
-        joined:   new Date(u.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-        sessions: role === 'interpreter' ? (interpreterCountMap[u.id] || 0) : (clientCountMap[u.id] || 0),
+        status:    statusMap[u.id] || 'active',
+        joined:    new Date(u.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+        createdAt: u.created_at, // FIX: raw timestamp — 'joined' above is pre-formatted for display, this is for stat computation (e.g. new signups this week)
+        sessions:  role === 'interpreter' ? (interpreterCountMap[u.id] || 0) : (clientCountMap[u.id] || 0),
         // Spend only applies to clients — interpreters earn, they don't
         // spend, so this is genuinely not applicable rather than $0.00.
         spent:    role === 'client' ? `$${(spentMap[u.id] || 0).toFixed(2)}` : null,
@@ -116,24 +117,60 @@ router.post('/users/:id/approve', requireAdmin, async (req, res) => {
 
 router.post('/users/invite', requireAdmin, async (req, res) => {
   try {
-    const { email, role = 'interpreter' } = req.body;
+    // FIX: was single-email only, called from a raw window.prompt() dialog
+    // with failures silently swallowed into console.error — completely
+    // impractical for onboarding hundreds of interpreters, and any real
+    // failure (e.g. hitting Supabase's email rate limit) gave the admin no
+    // indication anything went wrong. Now accepts either a single email or
+    // an array, and returns a per-email result so partial failures are
+    // actually visible rather than hidden.
+    const { emails: rawEmails, email, role = 'interpreter' } = req.body;
+    const emails = rawEmails ?? (email ? [email] : []);
 
-    // Validate email format
-    if (!email || typeof email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      return res.status(400).json({ error: 'Valid email address is required' });
+    if (!Array.isArray(emails) || emails.length === 0) {
+      return res.status(400).json({ error: 'Provide "email" (string) or "emails" (array)' });
+    }
+    // Sane upper bound per request — bulk-invite hundreds via a few
+    // requests rather than one massive one, partly to keep each request
+    // fast, partly because Supabase's own email sending rate limit means a
+    // single huge batch would mostly fail anyway (see the rate-limit note
+    // this endpoint's caller should already be aware of).
+    if (emails.length > 50) {
+      return res.status(400).json({ error: 'Max 50 emails per request — split into batches' });
     }
 
-    // Whitelist allowed roles — prevents admin from accidentally assigning 'admin'
-    // via this invite flow; admin role assignment requires direct DB access.
     const ALLOWED_INVITE_ROLES = ['interpreter', 'client'];
     if (!ALLOWED_INVITE_ROLES.includes(role)) {
       return res.status(400).json({ error: `role must be one of: ${ALLOWED_INVITE_ROLES.join(', ')}` });
     }
 
-    await supabaseAdmin.auth.admin.inviteUserByEmail(email, { data: { role } });
-    res.json({ success: true });
+    const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const results = [];
+
+    for (const rawEmail of emails) {
+      const trimmed = typeof rawEmail === 'string' ? rawEmail.trim() : '';
+      if (!emailPattern.test(trimmed)) {
+        results.push({ email: rawEmail, ok: false, error: 'Invalid email format' });
+        continue;
+      }
+      try {
+        const { error } = await supabaseAdmin.auth.admin.inviteUserByEmail(trimmed, { data: { role } });
+        if (error) throw error;
+        results.push({ email: trimmed, ok: true });
+      } catch (err) {
+        // Surface Supabase's actual error message (e.g. rate limit) rather
+        // than a generic failure, since that's exactly the kind of thing
+        // an admin needs to see to know why a batch partially failed.
+        results.push({ email: trimmed, ok: false, error: err.message || 'Failed to send invite' });
+        logger.warn({ err, email: trimmed }, 'Invite failed for one recipient');
+      }
+    }
+
+    const succeeded = results.filter(r => r.ok).length;
+    res.json({ succeeded, failed: results.length - succeeded, results });
   } catch (err) {
-    res.status(500).json({ error: 'Failed to invite user' });
+    logger.error({ err }, 'Bulk invite error');
+    res.status(500).json({ error: 'Failed to process invites' });
   }
 });
 
