@@ -492,9 +492,14 @@ router.get('/interpreters', requireAuth, async (req, res) => {
     // admin.mjs, registerHandler.mjs) uses 'interpreters'. This endpoint has
     // likely never returned real data, which is why the client booking flow
     // ended up with a hardcoded interpreter list instead.
+    // FIX: added years_experience, certifications, specialties, is_verified
+    // (was already selected, now also mapped through) — needed for the
+    // trust-building profile rebuild. Select list stays intentionally
+    // narrow rather than 'select(*)' so the compact card payload doesn't
+    // balloon; the full detail endpoint below fetches everything.
     let query = supabaseAdmin
       .from('interpreters')
-      .select('user_id, languages, rating, price_per_minute, bio, is_verified, is_available, users(full_name, avatar_url)')
+      .select('user_id, languages, rating, price_per_minute, bio, is_verified, is_available, years_experience, specialties, users(full_name, avatar_url)')
       .eq('is_available', true)
       .eq('is_verified', true);
 
@@ -508,21 +513,59 @@ router.get('/interpreters', requireAuth, async (req, res) => {
     if (error) throw error;
 
     const interpreters = (data || []).map((i) => ({
-      id:         i.user_id,
-      name:       i.users?.full_name ?? 'Unknown',
-      avatar:     i.users?.avatar_url ?? null,
-      languages:  i.languages || [],
-      rating:     i.rating || 0,
-      bio:        i.bio || '',
-      verified:   i.is_verified,
-      online:     i.is_available,
-      ratePerMin: i.price_per_minute || null,
+      id:              i.user_id,
+      name:            i.users?.full_name ?? 'Unknown',
+      avatar:          i.users?.avatar_url ?? null,
+      languages:       i.languages || [],
+      rating:          i.rating || 0,
+      bio:             i.bio || '',
+      verified:        i.is_verified,
+      online:          i.is_available,
+      ratePerMin:      i.price_per_minute || null,
+      yearsExperience: i.years_experience || 0,
+      specialties:     i.specialties || [],
     }));
 
     res.json({ interpreters });
   } catch (err) {
     logger.error({ err }, 'Interpreters error');
     res.json({ interpreters: [] });
+  }
+});
+
+// ── GET /v1/interpreters/:id ─────────────────────────────────────────────────
+// FIX: new endpoint — powers the "View full profile" detail view on client
+// booking cards (InterpreterProfileModal.jsx). The compact list above
+// intentionally omits certifications and full bio length to keep the list
+// payload small; this fetches the complete profile for one interpreter.
+router.get('/interpreters/:id', requireAuth, async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('interpreters')
+      .select('user_id, languages, rating, price_per_minute, bio, is_verified, is_available, years_experience, certifications, specialties, users(full_name, avatar_url, created_at)')
+      .eq('user_id', req.params.id)
+      .single();
+
+    if (error || !data) return res.status(404).json({ error: 'Interpreter not found' });
+
+    res.json({
+      id:              data.user_id,
+      name:            data.users?.full_name ?? 'Unknown',
+      avatar:          data.users?.avatar_url ?? null,
+      languages:       data.languages || [],
+      rating:          data.rating || 0,
+      bio:             data.bio || '',
+      verified:        data.is_verified,
+      online:          data.is_available,
+      ratePerMin:      data.price_per_minute || null,
+      yearsExperience: data.years_experience || 0,
+      certifications:  data.certifications || [],
+      specialties:     data.specialties || [],
+      memberSince:     data.users?.created_at ?? null,
+    });
+  } catch (err) {
+    logger.error({ err, id: req.params.id }, 'Interpreter detail error');
+    res.status(500).json({ error: 'Failed to load interpreter profile' });
   }
 });
 

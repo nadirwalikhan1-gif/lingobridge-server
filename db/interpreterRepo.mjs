@@ -149,7 +149,13 @@ export async function updateInterpreterSettings(userId, updates) {
  * live on the `users` table and go through updateUser() in userRepo.mjs instead.
  */
 export async function updateInterpreterProfile(userId, updates) {
-  const allowed = ['bio', 'languages'];
+  // FIX: added years_experience, certifications, specialties — new columns
+  // for the full trust-building profile rebuild (see migration
+  // migration-interpreter-profile-fields.sql). Same whitelist pattern as
+  // before: anything not in this list is silently dropped rather than
+  // erroring, so any new field added here MUST also be added to this array
+  // or it will save nothing with no error shown.
+  const allowed = ['bio', 'languages', 'years_experience', 'certifications', 'specialties'];
   const sanitized = Object.fromEntries(
     Object.entries(updates).filter(([k]) => allowed.includes(k))
   );
