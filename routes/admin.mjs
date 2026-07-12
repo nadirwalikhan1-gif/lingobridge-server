@@ -199,9 +199,23 @@ router.get('/interpreters', requireAdmin, async (req, res) => {
       email:       i.users?.email || '',
       initials:    initials(i.users?.full_name),
       languages:   i.languages || [],
+      langs:       i.languages || [], // FIX: Interpreters.jsx page reads `langs`, not `languages` — kept both keys so nothing else that relies on `languages` breaks.
       rating:      i.rating || 0,
       isAvailable: i.is_available,
       isVerified:  i.is_verified,
+      // FIX: this endpoint never returned a `status` field at all, but
+      // Interpreters.jsx does `STATUS_CFG[i.status]` and then reads `.dot`
+      // off the result with no guard — i.status was always undefined,
+      // STATUS_CFG[undefined] was always undefined, and `.dot` on that
+      // crashed the whole page on every single interpreter. This derives
+      // the two states we can actually know from this table. Note: this
+      // can't distinguish "online but not currently in a call" from "busy
+      // in an active session" — that would need a join against active
+      // sessions, which isn't available here. For now available → online,
+      // anything else → offline; upgrade to a real 'busy' state once
+      // there's a live-session signal to check against (e.g. the same
+      // source InterpreterPresence.jsx on the dashboard uses).
+      status:      i.is_available ? 'online' : 'offline',
       joined:      new Date(i.users?.created_at || i.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
     })));
   } catch (err) {
