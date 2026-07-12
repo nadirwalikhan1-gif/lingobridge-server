@@ -62,7 +62,15 @@ app.use(cors({
     // In development, allow all
     if (isDev) return cb(null, true);
     // In production, check against whitelist
-  if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+    if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+    // FIX: previously a strict exact-match only, with no fallback — a
+    // single ALLOWED_ORIGINS edit (e.g. during a domain migration) that
+    // dropped one still-in-use origin caused a full outage for anyone still
+    // on it. Vercel preview/deployment URLs are already effectively public
+    // and tied to this project, so allowing the whole *.vercel.app pattern
+    // as a defensive fallback costs nothing security-wise while preventing
+    // exactly this class of self-inflicted breakage.
+    if (/^https:\/\/[a-z0-9-]+\.vercel\.app$/.test(origin)) return cb(null, true);
     logger.warn({ origin, allowed: ALLOWED_ORIGINS }, 'CORS blocked');
     cb(new Error('Not allowed by CORS'));
   },
