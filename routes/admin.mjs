@@ -154,7 +154,16 @@ router.post('/users/invite', requireAdmin, async (req, res) => {
         continue;
       }
       try {
-        const { error } = await supabaseAdmin.auth.admin.inviteUserByEmail(trimmed, { data: { role } });
+        // FIX: no redirectTo meant Supabase fell back to the project's
+        // default Site URL, landing the invited interpreter on '/' with a
+        // session already active and no page to prompt them for a
+        // password (see AcceptInvitePage.jsx). Sending them to
+        // /accept-invite explicitly closes that gap.
+        // Reads FRONTEND_URL first since that's what's actually set on
+        // Railway; CLIENT_URL kept as a fallback name since v1.mjs
+        // elsewhere in this codebase uses that instead.
+        const redirectTo = `${process.env.FRONTEND_URL || process.env.CLIENT_URL || 'https://andiraw.vercel.app'}/accept-invite`;
+        const { error } = await supabaseAdmin.auth.admin.inviteUserByEmail(trimmed, { data: { role }, redirectTo });
         if (error) throw error;
         results.push({ email: trimmed, ok: true });
       } catch (err) {
