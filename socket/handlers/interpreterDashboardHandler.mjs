@@ -20,6 +20,7 @@
 
 import { rateLimitSocket } from '../../middleware/rateLimiter.mjs';
 import { logger } from '../../config/logger.mjs';
+import { supabaseAdmin } from '../../config/supabase.mjs';
 
 import {
   getInterpreterByUserId,
@@ -290,12 +291,55 @@ export function interpreterDashboardHandler(io, socket) {
   });
 
   // ── Profile ───────────────────────────────────────────────────────────────────
+
+  // FIX: certifications store a private storage path (filePath), never a
+  // public URL — see migration-certification-proof-docs.sql. When the
+  // interpreter views their OWN profile, generate a short-lived (1hr)
+  // signed URL per certification so they can actually see/download what
+  // they uploaded. This must never run for any client-facing endpoint —
+  // only here, where userId is already verified as the profile owner.
+  async function enrichCertificationsWithSignedUrls(certifications) {
+    return Promise.all((certifications || []).map(async (cert) => {
+      if (!cert.filePath) return { ...cert, fileUrl: null };
+      const { data, error } = await supabaseAdmin.storage
+        .from('certification-docs')
+        .createSignedUrl(cert.filePath, 3600);
+      if (error) {
+        logger.error({ err: error, filePath: cert.filePath }, 'Failed to sign certification doc URL');
+        return { ...cert, fileUrl: null };
+      }
+      return { ...cert, fileUrl: data.signedUrl };
+    }));
+  }
+
+  // FIX: `verified` must never be settable by the interpreter directly —
+  // only an admin reviewing the uploaded document should be able to flip
+  // it. This preserves the existing verified flag ONLY when a
+  // certification's filePath is unchanged from what's already stored
+  // (i.e. nothing about that specific proof document changed); anything
+  // new or edited resets to false and requires re-review. Without this,
+  // an interpreter could just include verified: true in the socket
+  // payload themselves and self-verify.
+  function sanitizeCertificationsForSave(existingCerts, incomingCerts) {
+    const existingByPath = new Map(
+      (existingCerts || []).filter(c => c.filePath).map(c => [c.filePath, c])
+    );
+    return (incomingCerts || []).map(c => ({
+      name: c.name,
+      filePath: c.filePath ?? null,
+      verified: c.filePath && existingByPath.has(c.filePath)
+        ? existingByPath.get(c.filePath).verified
+        : false,
+    }));
+  }
+
   socket.on('get-interpreter-profile', async () => {
     const userId = requireAuth(socket);
     if (!userId) return;
 
     try {
       const profile = await getInterpreterByUserId(userId);
+      profile.certifications = await enrichCertificationsWithSignedUrls(profile.certifications);
       socket.emit('interpreter-profile', { profile });
     } catch (err) {
       logger.error({ err, userId }, 'get-interpreter-profile failed');
@@ -313,7 +357,14 @@ export function interpreterDashboardHandler(io, socket) {
       if (updates.full_name !== undefined || updates.avatar_url !== undefined) {
         await updateUser(userId, updates);
       }
+
+      if (updates.certifications !== undefined) {
+        const current = await getInterpreterByUserId(userId);
+        updates.certifications = sanitizeCertificationsForSave(current.certifications, updates.certifications);
+      }
+
       const profile = await updateInterpreterProfile(userId, updates);
+      profile.certifications = await enrichCertificationsWithSignedUrls(profile.certifications);
       socket.emit('profile-saved', { ok: true, profile });
     } catch (err) {
       logger.error({ err, userId }, 'update-interpreter-profile failed');

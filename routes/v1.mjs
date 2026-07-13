@@ -559,7 +559,11 @@ router.get('/interpreters/:id', requireAuth, async (req, res) => {
       online:          data.is_available,
       ratePerMin:      data.price_per_minute || null,
       yearsExperience: data.years_experience || 0,
-      certifications:  data.certifications || [],
+      // FIX: never send filePath to a client-facing endpoint — it's a
+      // private storage path to a personal document (see
+      // migration-certification-proof-docs.sql). Only the certification
+      // name and whether an admin has verified it are ever public.
+      certifications:  (data.certifications || []).map(c => ({ name: c.name, verified: c.verified })),
       specialties:     data.specialties || [],
       memberSince:     data.users?.created_at ?? null,
     });
@@ -1149,6 +1153,57 @@ router.post('/users/me/avatar', requireAuth, upload.single('avatar'), async (req
   } catch (err) {
     logger.error({ err, userId: req.user.id }, 'Avatar upload failed');
     res.status(500).json({ error: err.message || 'Failed to upload avatar' });
+  }
+});
+
+// FIX: separate multer instance from the avatar one above — certification
+// proof documents are commonly PDFs (scanned certificates), not just images.
+const uploadCertDoc = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB — scanned certs can be larger than a profile photo
+  fileFilter: (req, file, cb) => {
+    const allowed = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
+    if (!allowed.includes(file.mimetype)) {
+      return cb(new Error('Only JPEG, PNG, WebP, or PDF files are allowed'));
+    }
+    cb(null, true);
+  },
+});
+
+// ── POST /v1/interpreters/me/certification-file ──────────────────────────────
+// Requires a PRIVATE Supabase Storage bucket named "certification-docs" —
+// see migration-certification-proof-docs.sql, which creates it with
+// public=false. Unlike the avatar endpoint above, this deliberately does
+// NOT return a public URL — certification proof documents are personal
+// records (they often contain a full name, license numbers, etc.) and
+// should never be reachable by an unauthenticated guess at the file path.
+// Returns only the storage path; the frontend then calls
+// get-interpreter-profile over the socket to receive a short-lived signed
+// URL for actually viewing/downloading it (see
+// interpreterDashboardHandler.mjs).
+router.post('/interpreters/me/certification-file', requireAuth, uploadCertDoc.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const ext = req.file.originalname.split('.').pop() || 'pdf';
+    const path = `${req.user.id}/${Date.now()}.${ext}`;
+
+    const { error: uploadErr } = await supabaseAdmin.storage
+      .from('certification-docs')
+      .upload(path, req.file.buffer, {
+        contentType: req.file.mimetype,
+        upsert: false, // each cert's proof gets its own timestamped path, never overwrite
+      });
+
+    if (uploadErr) throw uploadErr;
+
+    logger.info({ userId: req.user.id }, 'Certification document uploaded');
+    res.json({ data: { filePath: path } });
+  } catch (err) {
+    logger.error({ err, userId: req.user.id }, 'Certification document upload failed');
+    res.status(500).json({ error: err.message || 'Failed to upload certification document' });
   }
 });
 
