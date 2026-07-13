@@ -224,6 +224,93 @@ router.get('/interpreters', requireAdmin, async (req, res) => {
   }
 });
 
+// ── Certification review queue ───────────────────────────────────────────────
+// FIX: new — closes the loop opened by the certification proof-upload
+// feature (migration-certification-proof-docs.sql). Certifications with an
+// attached document always start as verified:false; without this queue
+// there was no way for an admin to actually review them, so no
+// certification could ever earn its verified badge.
+router.get('/certifications/pending', requireAdmin, async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('interpreters')
+      .select('user_id, certifications, users(full_name, email)')
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+
+    const pending = [];
+    for (const interp of data || []) {
+      for (const cert of interp.certifications || []) {
+        // Only certs with an actual proof document attached and not yet
+        // verified belong in the queue — a cert with no filePath has
+        // nothing for an admin to review.
+        if (cert.filePath && !cert.verified) {
+          let signedUrl = null;
+          const { data: signed, error: signErr } = await supabaseAdmin.storage
+            .from('certification-docs')
+            .createSignedUrl(cert.filePath, 3600);
+          if (signErr) {
+            logger.error({ err: signErr, filePath: cert.filePath }, 'Failed to sign cert doc for admin review');
+          } else {
+            signedUrl = signed.signedUrl;
+          }
+
+          pending.push({
+            interpreterId: interp.user_id,
+            interpreterName: interp.users?.full_name || 'Unknown',
+            interpreterEmail: interp.users?.email || '',
+            certName: cert.name,
+            filePath: cert.filePath,
+            documentUrl: signedUrl,
+          });
+        }
+      }
+    }
+
+    res.json({ pending });
+  } catch (err) {
+    logger.error({ err }, 'Certification review queue error');
+    res.status(500).json({ error: 'Failed to load certification review queue' });
+  }
+});
+
+router.post('/certifications/review', requireAdmin, async (req, res) => {
+  try {
+    const { interpreterId, filePath, approve } = req.body;
+    if (!interpreterId || !filePath || typeof approve !== 'boolean') {
+      return res.status(400).json({ error: 'interpreterId, filePath, and approve (boolean) are required' });
+    }
+
+    const { data: interp, error: fetchErr } = await supabaseAdmin
+      .from('interpreters')
+      .select('certifications')
+      .eq('user_id', interpreterId)
+      .single();
+    if (fetchErr || !interp) return res.status(404).json({ error: 'Interpreter not found' });
+
+    // FIX: reject removes the certification entirely rather than leaving it
+    // sitting at verified:false forever — an admin explicitly rejecting a
+    // document means it wasn't valid proof, so it shouldn't linger on the
+    // interpreter's profile implying it's still "pending". They can always
+    // re-add and re-upload if it was a mistake.
+    const updated = approve
+      ? (interp.certifications || []).map(c => c.filePath === filePath ? { ...c, verified: true } : c)
+      : (interp.certifications || []).filter(c => c.filePath !== filePath);
+
+    const { error: updateErr } = await supabaseAdmin
+      .from('interpreters')
+      .update({ certifications: updated })
+      .eq('user_id', interpreterId);
+    if (updateErr) throw updateErr;
+
+    logger.info({ interpreterId, filePath, approve, adminId: req.user.id }, 'Certification reviewed');
+    res.json({ ok: true });
+  } catch (err) {
+    logger.error({ err }, 'Certification review action error');
+    res.status(500).json({ error: 'Failed to review certification' });
+  }
+});
+
 // ── Sessions ──────────────────────────────────────────────────────────────────
 router.get('/sessions', requireAdmin, async (req, res) => {
   try {
