@@ -283,7 +283,7 @@ router.post('/certifications/review', requireAdmin, async (req, res) => {
 
     const { data: interp, error: fetchErr } = await supabaseAdmin
       .from('interpreters')
-      .select('certifications')
+      .select('certifications, is_verified')
       .eq('user_id', interpreterId)
       .single();
     if (fetchErr || !interp) return res.status(404).json({ error: 'Interpreter not found' });
@@ -297,9 +297,21 @@ router.post('/certifications/review', requireAdmin, async (req, res) => {
       ? (interp.certifications || []).map(c => c.filePath === filePath ? { ...c, verified: true } : c)
       : (interp.certifications || []).filter(c => c.filePath !== filePath);
 
+    // FIX: approving a certification should mean something bigger than the
+    // cert chip alone — it should earn the interpreter their overall
+    // "Verified by Andiraw" badge (is_verified), which is what actually
+    // shows next to their name on the profile and client-facing cards.
+    // Only auto-GRANTS on approval; a reject never auto-revokes is_verified,
+    // since that flag may reflect other admin judgment beyond this one
+    // certification (e.g. background check, manual review) — revoking it
+    // stays a deliberate separate admin action, not a side effect of
+    // rejecting one document.
+    const patch = { certifications: updated };
+    if (approve && !interp.is_verified) patch.is_verified = true;
+
     const { error: updateErr } = await supabaseAdmin
       .from('interpreters')
-      .update({ certifications: updated })
+      .update(patch)
       .eq('user_id', interpreterId);
     if (updateErr) throw updateErr;
 
