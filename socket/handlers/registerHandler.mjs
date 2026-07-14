@@ -21,25 +21,41 @@ export function requestHandler(io, socket) {
       socket.interpreterRole = true;
 
       if (socket.userId) {
-        // FIX: no code path anywhere in this backend ever INSERTs a row into
-        // interpreters — every existing function (setInterpreterAvailability,
-        // setInterpreterStatus, etc.) only ever UPDATEs an existing row,
-        // which silently affects zero rows if one doesn't exist yet. This is
-        // exactly the "missing interpreters row" bug fixed manually via SQL
-        // for one legacy test account earlier in this project — without this,
-        // it would recur for every genuinely new interpreter signup. Defaults
-        // to is_verified: false / is_available: false — a new interpreter
-        // shouldn't be bookable until an admin actually verifies them (see
-        // POST /v1/admin/users/:id/approve), matching the real vetting the
-        // product's "Background checked" claim implies.
-        const { error: profileErr } = await supabaseAdmin
+        // FIX: previously used .upsert(..., { onConflict: 'user_id', ignoreDuplicates: true })
+        // intending to create a default row only if one didn't already exist,
+        // without ever touching an existing interpreter's real data. That's
+        // exactly the kind of thing that's fragile in practice — it depends
+        // on 'user_id' truly being configured as a unique/primary-key
+        // constraint at the Postgres level for ON CONFLICT to even resolve
+        // correctly, and on the Supabase client version's exact upsert
+        // semantics. Given 'register' fires on EVERY socket connect AND
+        // reconnect (page nav, tab refocus, or — as seen in production logs —
+        // frequent network-blip reconnects, sometimes every 10-30 seconds),
+        // any ambiguity here is dangerous: a bug would silently reset
+        // is_verified/is_available back to false on a real interpreter's
+        // row shortly after an admin approved them, with no error anywhere.
+        // This is exactly the symptom that was reported. Replacing with an
+        // explicit check-then-insert removes all ambiguity: if a row
+        // already exists for this user, this code path does nothing to it,
+        // full stop — no upsert, no ON CONFLICT, no room for a constraint
+        // mismatch to silently overwrite real data.
+        const { data: existingRow, error: checkErr } = await supabaseAdmin
           .from('interpreters')
-          .upsert(
-            { user_id: socket.userId, is_available: false, is_verified: false, status: 'offline' },
-            { onConflict: 'user_id', ignoreDuplicates: true }
-          );
-        if (profileErr) {
-          logger.error({ err: profileErr, userId: socket.userId }, 'Failed to create interpreter profile row');
+          .select('user_id')
+          .eq('user_id', socket.userId)
+          .maybeSingle();
+
+        if (checkErr) {
+          logger.error({ err: checkErr, userId: socket.userId }, 'Failed to check for existing interpreter row');
+        } else if (!existingRow) {
+          const { error: insertErr } = await supabaseAdmin
+            .from('interpreters')
+            .insert({ user_id: socket.userId, is_available: false, is_verified: false, status: 'offline' });
+          if (insertErr) {
+            logger.error({ err: insertErr, userId: socket.userId }, 'Failed to create interpreter profile row');
+          } else {
+            logger.info({ userId: socket.userId }, 'Created default interpreter profile row (first connect)');
+          }
         }
 
         // FIX: 'register' is ALSO auto-emitted by lib/socket.js on every
