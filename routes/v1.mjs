@@ -237,22 +237,10 @@ router.get('/sessions/history', requireAuth, async (req, res) => {
     const sortBy     = req.query.sortBy     || 'date_desc';
     const search     = req.query.search     || '';
 
-    // Base query
+    // Build the base query — match the pattern used in /v1/sessions above
     let query = supabaseAdmin
       .from('sessions')
-      .select(`
-        id,
-        session_type,
-        language,
-        status,
-        started_at,
-        ended_at,
-        duration_minutes,
-        cost,
-        interpreter_id,
-        interpreters!inner(user_id, full_name, avatar_url),
-        invoices(id)
-      `, { count: 'exact' })
+      .select('*', { count: 'exact' })
       .eq('client_id', userId);
 
     // Type filter (audio / video)
@@ -260,7 +248,7 @@ router.get('/sessions/history', requireAuth, async (req, res) => {
       query = query.eq('session_type', typeFilter);
     }
 
-    // Date filter
+    // Date filter on started_at (or created_at as fallback)
     const now = new Date();
     if (dateFilter === 'today') {
       const start = new Date(now); start.setHours(0,0,0,0);
@@ -276,14 +264,14 @@ router.get('/sessions/history', requireAuth, async (req, res) => {
       query = query.gte('started_at', start.toISOString());
     }
 
-    // Sorting
+    // Sorting — use started_at as primary, fall back to created_at
     const sortMap = {
       date_desc:     { column: 'started_at', ascending: false },
       date_asc:      { column: 'started_at', ascending: true },
       price_desc:    { column: 'cost', ascending: false },
       price_asc:     { column: 'cost', ascending: true },
       duration_desc: { column: 'duration_minutes', ascending: false },
-      rating_desc:   { column: 'interpreter_rating', ascending: false },
+      rating_desc:   { column: 'started_at', ascending: false }, // fallback since rating lives on session_ratings
     };
     const sort = sortMap[sortBy] || sortMap.date_desc;
     query = query.order(sort.column, { ascending: sort.ascending });
@@ -291,22 +279,56 @@ router.get('/sessions/history', requireAuth, async (req, res) => {
     // Pagination
     query = query.range(offset, offset + limit - 1);
 
-    const { data, error, count } = await query;
-    if (error) throw error;
+    const { data: sessionsData, error, count } = await query;
+    if (error) {
+      logger.error({ error, userId }, 'Session history query error');
+      throw error;
+    }
+
+    // Fetch interpreter names + ratings in a second batch (avoid complex joins that can 500)
+    const interpreterIds = [...new Set((sessionsData || []).map(s => s.interpreter_id).filter(Boolean))];
+    let interpreterMap = {};
+    let ratingsMap = {};
+
+    if (interpreterIds.length > 0) {
+      const { data: interpreters } = await supabaseAdmin
+        .from('users')
+        .select('id, full_name, avatar_url')
+        .in('id', interpreterIds);
+
+      interpreterMap = Object.fromEntries(
+        (interpreters || []).map(i => [i.id, i])
+      );
+
+      // Fetch ratings for these sessions
+      const sessionIds = (sessionsData || []).map(s => s.id);
+      const { data: ratings } = await supabaseAdmin
+        .from('session_ratings')
+        .select('session_id, interpreter_rating')
+        .in('session_id', sessionIds);
+
+      ratingsMap = Object.fromEntries(
+        (ratings || []).map(r => [r.session_id, r.interpreter_rating])
+      );
+    }
 
     // Search filter (client-side on name/language)
-    let sessions = data || [];
+    let sessions = sessionsData || [];
     if (search.trim()) {
       const q = search.toLowerCase();
-      sessions = sessions.filter(s =>
-        (s.interpreters?.full_name ?? '').toLowerCase().includes(q) ||
-        (s.language ?? '').toLowerCase().includes(q)
-      );
+      sessions = sessions.filter(s => {
+        const interp = interpreterMap[s.interpreter_id];
+        return (
+          (interp?.full_name ?? '').toLowerCase().includes(q) ||
+          (s.language ?? '').toLowerCase().includes(q)
+        );
+      });
     }
 
     // Map to the shape SessionHistory.jsx expects
     const mapped = sessions.map(s => {
-      const fullName = s.interpreters?.full_name ?? 'Unknown Interpreter';
+      const interp = interpreterMap[s.interpreter_id];
+      const fullName = interp?.full_name ?? 'Unknown Interpreter';
       const initials = fullName.split(' ').map(n => n[0]).join('').slice(0,2).toUpperCase();
       return {
         id: s.id,
@@ -318,10 +340,10 @@ router.get('/sessions/history', requireAuth, async (req, res) => {
         language: s.language ?? '',
         status: s.status,
         date: s.started_at ? new Date(s.started_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '',
-        duration: s.duration_minutes ?? 0,
-        price: s.cost ?? 0,
-        rating: s.interpreter_rating ?? null,
-        invoiceId: s.invoices?.[0]?.id ?? null,
+        duration: s.duration_minutes ?? s.duration ?? 0,
+        price: s.cost ?? s.price ?? 0,
+        rating: ratingsMap[s.id] ?? null,
+        invoiceId: null, // TODO: link when invoices table is ready
         hasRecording: false,
       };
     });
@@ -331,8 +353,8 @@ router.get('/sessions/history', requireAuth, async (req, res) => {
 
     res.json({ sessions: mapped, totalCount, totalPages, page });
   } catch (err) {
-    logger.error({ err }, 'Session history error');
-    res.status(500).json({ error: 'Failed to load session history' });
+    logger.error({ err, userId: req.user?.id }, 'Session history error');
+    res.status(500).json({ error: 'Failed to load session history', detail: err.message });
   }
 });
 
