@@ -351,10 +351,23 @@ router.get('/sessions/history', requireAuth, async (req, res) => {
     const totalCount = count || 0;
     const totalPages = Math.ceil(totalCount / limit);
 
-    res.json({ sessions: mapped, totalCount, totalPages, page });
+    // Always return a valid object even if everything is empty
+    res.json({
+      sessions: mapped || [],
+      totalCount: totalCount || 0,
+      totalPages: totalPages || 1,
+      page: page || 1,
+    });
   } catch (err) {
     logger.error({ err, userId: req.user?.id }, 'Session history error');
-    res.status(500).json({ error: 'Failed to load session history', detail: err.message });
+    // Return 200 with empty data rather than 500, so the UI can show "No sessions" instead of crashing
+    res.status(200).json({
+      sessions: [],
+      totalCount: 0,
+      totalPages: 1,
+      page: 1,
+      error: err.message,
+    });
   }
 });
 
