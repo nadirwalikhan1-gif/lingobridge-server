@@ -1,12 +1,12 @@
 // socket/handlers/interpreterDashboardHandler.mjs
 //
 // Handles: get-dashboard-stats, get-earnings-summary, get-earnings-breakdown,
-//          get-earnings-chart, get-payout-history, get-performance-stats,
-//          get-rating-summary, get-reviews, get-transactions, get-balance,
-//          get-interpreter-profile, get-interpreter-rates,
-//          get-interpreter-settings, update-interpreter-profile,
-//          update-interpreter-settings, request-data-export,
-//          submit-support-ticket
+//          get-earnings-chart, get-payout-history, get-session-history,
+//          get-schedule-today, get-performance-stats, get-rating-summary,
+//          get-reviews, get-transactions, get-balance, get-interpreter-profile,
+//          get-interpreter-rates, get-interpreter-settings,
+//          update-interpreter-profile, update-interpreter-settings,
+//          request-data-export, submit-support-ticket
 //
 // These were previously emitted by the interpreter dashboard with zero
 // server-side handlers — every page silently hit its REST-fallback-timeout
@@ -203,6 +203,132 @@ export function interpreterDashboardHandler(io, socket) {
     } catch (err) {
       logger.error({ err, userId }, 'get-payout-history failed');
       socket.emit('error', { code: 'SERVER_ERROR', message: 'Could not load payout history' });
+    }
+  });
+
+  // ── Session history ──────────────────────────────────────────────────────────
+  // FIX: MySessions.jsx, the "Recent sessions" dashboard widget, and the
+  // history tab of Requests.jsx all previously called
+  // fetch('/api/interpreter/sessions...') — a path that has never existed on
+  // this server (the real API is /v1/* REST + these socket events; nothing
+  // is mounted at /api). The request 404'd every time and was silently
+  // caught, leaving those views stuck empty/loading forever.
+  // getSessionsByInterpreter() already existed in sessionRepo.mjs for this
+  // exact purpose but was never wired to a route or event — same gap this
+  // file already closed for dashboard stats, reviews, etc. above.
+  socket.on('get-session-history', async ({ limit = 20, offset = 0 } = {}) => {
+    const userId = requireAuth(socket);
+    if (!userId) return;
+
+    try {
+      const interpreter = await getInterpreterByUserId(userId);
+      const sessions = await getSessionsByInterpreter(interpreter.id, limit, offset);
+
+      // Real per-session earnings from the transaction ledger — not
+      // estimated from rate * duration, which wouldn't reflect holds,
+      // extensions, or refunds that happened mid-session.
+      const sessionIds = sessions.map((s) => s.id);
+      let earningsBySession = {};
+      if (sessionIds.length > 0) {
+        const { data: txns } = await supabaseAdmin
+          .from('transactions')
+          .select('session_id, amount')
+          .eq('user_id', userId)
+          .eq('vault_type', 'interpreter')
+          .in('session_id', sessionIds);
+        earningsBySession = (txns || []).reduce((acc, t) => {
+          acc[t.session_id] = (acc[t.session_id] || 0) + Number(t.amount || 0);
+          return acc;
+        }, {});
+      }
+
+      // Client display name, via a batch lookup rather than a join on
+      // getSessionsByInterpreter() (that function is shared — adding a
+      // join there would change its shape for every other caller).
+      const clientIds = [...new Set(sessions.map((s) => s.client_id).filter(Boolean))];
+      let clientNameById = {};
+      if (clientIds.length > 0) {
+        const { data: clients } = await supabaseAdmin
+          .from('users')
+          .select('id, full_name')
+          .in('id', clientIds);
+        clientNameById = (clients || []).reduce((acc, c) => {
+          acc[c.id] = c.full_name;
+          return acc;
+        }, {});
+      }
+
+      const fmtMinutes = (secs) => {
+        if (!secs) return null;
+        const mins = Math.round(secs / 60);
+        const h = Math.floor(mins / 60);
+        const m = mins % 60;
+        return h > 0 ? `${h}h ${m}m` : `${m}m`;
+      };
+
+      // camelCase aliases alongside the raw row so this lines up with the
+      // fields session-update/session-started/session-ended already emit
+      // (see endCallHandler.mjs / sessionHandlers.mjs), which MySessions.jsx
+      // merges into the same list for live updates.
+      const enriched = sessions.map((s) => ({
+        ...s,
+        fromLang:    s.language,
+        toLang:      s.to_language,
+        sessionType: s.session_type,
+        earnings:    earningsBySession[s.id] ?? null,
+        startedAt:   s.started_at,
+        endedAt:     s.ended_at,
+        createdAt:   s.created_at,
+        clientName:  clientNameById[s.client_id] ?? null,
+        duration:    fmtMinutes(s.booked_duration),
+        category:    s.purpose ? s.purpose.charAt(0).toUpperCase() + s.purpose.slice(1) : null,
+      }));
+
+      socket.emit('session-history', { sessions: enriched });
+    } catch (err) {
+      logger.error({ err, userId }, 'get-session-history failed');
+      socket.emit('error', { code: 'SERVER_ERROR', message: 'Could not load session history' });
+    }
+  });
+
+  // ── Today's schedule ─────────────────────────────────────────────────────────
+  // FIX: TodaysSchedule.jsx (dashboard widget) previously called
+  // fetch('/api/interpreter/schedule/today') and
+  // fetch('/api/interpreter/schedule/:id/remind') — neither route has ever
+  // existed on the server. Wired the load to real data below.
+  // IMPORTANT: this platform is currently "request now" only — there is no
+  // booking flow anywhere that creates a session with status='scheduled'
+  // for a future time (the one client-facing entry point for scheduling,
+  // Favourites.jsx's "Schedule" button, is deliberately disabled with a
+  // "coming soon" tooltip). So this honestly returns an empty schedule
+  // today, same as it will keep doing until a real scheduling flow exists
+  // to populate 'scheduled' sessions — that's a real product gap, not
+  // something to fake data around.
+  socket.on('get-schedule-today', async () => {
+    const userId = requireAuth(socket);
+    if (!userId) return;
+
+    try {
+      const interpreter = await getInterpreterByUserId(userId);
+      const startOfDay = new Date();
+      startOfDay.setHours(0, 0, 0, 0);
+      const endOfDay = new Date();
+      endOfDay.setHours(23, 59, 59, 999);
+
+      const { data, error } = await supabaseAdmin
+        .from('sessions')
+        .select('*')
+        .eq('interpreter_id', interpreter.id)
+        .eq('status', 'scheduled')
+        .gte('scheduled_at', startOfDay.toISOString())
+        .lte('scheduled_at', endOfDay.toISOString())
+        .order('scheduled_at', { ascending: true });
+
+      if (error) throw error;
+      socket.emit('schedule-today', { schedule: data || [] });
+    } catch (err) {
+      logger.error({ err, userId }, 'get-schedule-today failed');
+      socket.emit('error', { code: 'SERVER_ERROR', message: "Could not load today's schedule" });
     }
   });
 
@@ -449,6 +575,10 @@ export function interpreterDashboardHandler(io, socket) {
   });
 
   // ── Support ticket ────────────────────────────────────────────────────────────
+  // Shared across roles despite living in this interpreter-dashboard file —
+  // the client Help page (Help.jsx) uses this same event; socket.role is
+  // used above (not a hardcoded 'interpreter') so tickets are labeled
+  // correctly for either caller.
   socket.on('submit-support-ticket', async ({ subject, message } = {}) => {
     if (!rateLimitSocket(socket, 'submit-support-ticket', { max: 5, windowMs: 60_000 })) return;
     const userId = requireAuth(socket);
@@ -462,7 +592,7 @@ export function interpreterDashboardHandler(io, socket) {
     try {
       const ticket = await createSupportTicket({
         userId,
-        role: 'interpreter',
+        role: socket.role || 'interpreter',
         subject: subject.trim(),
         message: message.trim(),
       });
