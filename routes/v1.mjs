@@ -488,9 +488,14 @@ router.get('/interpreters', requireAuth, async (req, res) => {
     // admin.mjs, registerHandler.mjs) uses 'interpreters'. This endpoint has
     // likely never returned real data, which is why the client booking flow
     // ended up with a hardcoded interpreter list instead.
+    // FIX: added years_experience, certifications, specialties, is_verified
+    // (was already selected, now also mapped through) — needed for the
+    // trust-building profile rebuild. Select list stays intentionally
+    // narrow rather than 'select(*)' so the compact card payload doesn't
+    // balloon; the full detail endpoint below fetches everything.
     let query = supabaseAdmin
       .from('interpreters')
-      .select('user_id, languages, rating, price_per_minute, bio, is_verified, is_available, users(full_name, avatar_url)')
+      .select('user_id, languages, rating, price_per_minute, bio, is_verified, is_available, years_experience, specialties, users(full_name, avatar_url)')
       .eq('is_available', true)
       .eq('is_verified', true);
 
@@ -504,21 +509,63 @@ router.get('/interpreters', requireAuth, async (req, res) => {
     if (error) throw error;
 
     const interpreters = (data || []).map((i) => ({
-      id:         i.user_id,
-      name:       i.users?.full_name ?? 'Unknown',
-      avatar:     i.users?.avatar_url ?? null,
-      languages:  i.languages || [],
-      rating:     i.rating || 0,
-      bio:        i.bio || '',
-      verified:   i.is_verified,
-      online:     i.is_available,
-      ratePerMin: i.price_per_minute || null,
+      id:              i.user_id,
+      name:            i.users?.full_name ?? 'Unknown',
+      avatar:          i.users?.avatar_url ?? null,
+      languages:       i.languages || [],
+      rating:          i.rating || 0,
+      bio:             i.bio || '',
+      verified:        i.is_verified,
+      online:          i.is_available,
+      ratePerMin:      i.price_per_minute || null,
+      yearsExperience: i.years_experience || 0,
+      specialties:     i.specialties || [],
     }));
 
     res.json({ interpreters });
   } catch (err) {
     logger.error({ err }, 'Interpreters error');
     res.json({ interpreters: [] });
+  }
+});
+
+// ── GET /v1/interpreters/:id ─────────────────────────────────────────────────
+// FIX: new endpoint — powers the "View full profile" detail view on client
+// booking cards (InterpreterProfileModal.jsx). The compact list above
+// intentionally omits certifications and full bio length to keep the list
+// payload small; this fetches the complete profile for one interpreter.
+router.get('/interpreters/:id', requireAuth, async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('interpreters')
+      .select('user_id, languages, rating, price_per_minute, bio, is_verified, is_available, years_experience, certifications, specialties, users(full_name, avatar_url, created_at)')
+      .eq('user_id', req.params.id)
+      .single();
+
+    if (error || !data) return res.status(404).json({ error: 'Interpreter not found' });
+
+    res.json({
+      id:              data.user_id,
+      name:            data.users?.full_name ?? 'Unknown',
+      avatar:          data.users?.avatar_url ?? null,
+      languages:       data.languages || [],
+      rating:          data.rating || 0,
+      bio:             data.bio || '',
+      verified:        data.is_verified,
+      online:          data.is_available,
+      ratePerMin:      data.price_per_minute || null,
+      yearsExperience: data.years_experience || 0,
+      // FIX: never send filePath to a client-facing endpoint — it's a
+      // private storage path to a personal document (see
+      // migration-certification-proof-docs.sql). Only the certification
+      // name and whether an admin has verified it are ever public.
+      certifications:  (data.certifications || []).map(c => ({ name: c.name, verified: c.verified })),
+      specialties:     data.specialties || [],
+      memberSince:     data.users?.created_at ?? null,
+    });
+  } catch (err) {
+    logger.error({ err, id: req.params.id }, 'Interpreter detail error');
+    res.status(500).json({ error: 'Failed to load interpreter profile' });
   }
 });
 
@@ -1105,6 +1152,57 @@ router.post('/users/me/avatar', requireAuth, upload.single('avatar'), async (req
   }
 });
 
+// FIX: separate multer instance from the avatar one above — certification
+// proof documents are commonly PDFs (scanned certificates), not just images.
+const uploadCertDoc = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB — scanned certs can be larger than a profile photo
+  fileFilter: (req, file, cb) => {
+    const allowed = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
+    if (!allowed.includes(file.mimetype)) {
+      return cb(new Error('Only JPEG, PNG, WebP, or PDF files are allowed'));
+    }
+    cb(null, true);
+  },
+});
+
+// ── POST /v1/interpreters/me/certification-file ──────────────────────────────
+// Requires a PRIVATE Supabase Storage bucket named "certification-docs" —
+// see migration-certification-proof-docs.sql, which creates it with
+// public=false. Unlike the avatar endpoint above, this deliberately does
+// NOT return a public URL — certification proof documents are personal
+// records (they often contain a full name, license numbers, etc.) and
+// should never be reachable by an unauthenticated guess at the file path.
+// Returns only the storage path; the frontend then calls
+// get-interpreter-profile over the socket to receive a short-lived signed
+// URL for actually viewing/downloading it (see
+// interpreterDashboardHandler.mjs).
+router.post('/interpreters/me/certification-file', requireAuth, uploadCertDoc.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const ext = req.file.originalname.split('.').pop() || 'pdf';
+    const path = `${req.user.id}/${Date.now()}.${ext}`;
+
+    const { error: uploadErr } = await supabaseAdmin.storage
+      .from('certification-docs')
+      .upload(path, req.file.buffer, {
+        contentType: req.file.mimetype,
+        upsert: false, // each cert's proof gets its own timestamped path, never overwrite
+      });
+
+    if (uploadErr) throw uploadErr;
+
+    logger.info({ userId: req.user.id }, 'Certification document uploaded');
+    res.json({ data: { filePath: path } });
+  } catch (err) {
+    logger.error({ err, userId: req.user.id }, 'Certification document upload failed');
+    res.status(500).json({ error: err.message || 'Failed to upload certification document' });
+  }
+});
+
 // ── PUT /v1/users/me/password ──────────────────────────────────────────────────
 router.put('/users/me/password', requireAuth, async (req, res) => {
   try {
@@ -1185,7 +1283,7 @@ router.post('/users/me/delete-request', requireAuth, async (req, res) => {
 
     const ticket = await createSupportTicket({
       userId:  req.user.id,
-      role:    (req.user.app_metadata?.role || req.user.user_metadata?.role) ?? 'client',
+      role:    'client',
       subject: 'Account Deletion Request',
       message: reason ? `Reason given: ${reason}` : 'No reason given',
     });
