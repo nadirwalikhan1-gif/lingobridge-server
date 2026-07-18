@@ -221,6 +221,121 @@ router.post('/sessions/rebook', requireAuth, async (req, res) => {
   }
 });
 
+// ── GET /v1/sessions/history ─────────────────────────────────────────────────
+// Dedicated history endpoint with filtering, sorting, and pagination.
+// MUST be registered BEFORE /v1/sessions/:id so Express doesn't treat
+// "history" as a session ID.
+router.get('/sessions/history', requireAuth, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const page   = parseInt(req.query.page)  || 1;
+    const limit  = parseInt(req.query.limit) || 10;
+    const offset = (page - 1) * limit;
+
+    const dateFilter = req.query.dateFilter || 'all';
+    const typeFilter = req.query.type       || 'all';
+    const sortBy     = req.query.sortBy     || 'date_desc';
+    const search     = req.query.search     || '';
+
+    // Base query
+    let query = supabaseAdmin
+      .from('sessions')
+      .select(`
+        id,
+        session_type,
+        language,
+        status,
+        started_at,
+        ended_at,
+        duration_minutes,
+        cost,
+        interpreter_id,
+        interpreters!inner(user_id, full_name, avatar_url),
+        invoices(id)
+      `, { count: 'exact' })
+      .eq('client_id', userId);
+
+    // Type filter (audio / video)
+    if (typeFilter && typeFilter !== 'all') {
+      query = query.eq('session_type', typeFilter);
+    }
+
+    // Date filter
+    const now = new Date();
+    if (dateFilter === 'today') {
+      const start = new Date(now); start.setHours(0,0,0,0);
+      query = query.gte('started_at', start.toISOString());
+    } else if (dateFilter === 'week') {
+      const start = new Date(now); start.setDate(now.getDate() - 7);
+      query = query.gte('started_at', start.toISOString());
+    } else if (dateFilter === 'month') {
+      const start = new Date(now); start.setDate(1); start.setHours(0,0,0,0);
+      query = query.gte('started_at', start.toISOString());
+    } else if (dateFilter === 'year') {
+      const start = new Date(now); start.setMonth(0,1); start.setHours(0,0,0,0);
+      query = query.gte('started_at', start.toISOString());
+    }
+
+    // Sorting
+    const sortMap = {
+      date_desc:     { column: 'started_at', ascending: false },
+      date_asc:      { column: 'started_at', ascending: true },
+      price_desc:    { column: 'cost', ascending: false },
+      price_asc:     { column: 'cost', ascending: true },
+      duration_desc: { column: 'duration_minutes', ascending: false },
+      rating_desc:   { column: 'interpreter_rating', ascending: false },
+    };
+    const sort = sortMap[sortBy] || sortMap.date_desc;
+    query = query.order(sort.column, { ascending: sort.ascending });
+
+    // Pagination
+    query = query.range(offset, offset + limit - 1);
+
+    const { data, error, count } = await query;
+    if (error) throw error;
+
+    // Search filter (client-side on name/language)
+    let sessions = data || [];
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      sessions = sessions.filter(s =>
+        (s.interpreters?.full_name ?? '').toLowerCase().includes(q) ||
+        (s.language ?? '').toLowerCase().includes(q)
+      );
+    }
+
+    // Map to the shape SessionHistory.jsx expects
+    const mapped = sessions.map(s => {
+      const fullName = s.interpreters?.full_name ?? 'Unknown Interpreter';
+      const initials = fullName.split(' ').map(n => n[0]).join('').slice(0,2).toUpperCase();
+      return {
+        id: s.id,
+        interpreter: {
+          name: fullName,
+          initials,
+        },
+        type: s.session_type,
+        language: s.language ?? '',
+        status: s.status,
+        date: s.started_at ? new Date(s.started_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '',
+        duration: s.duration_minutes ?? 0,
+        price: s.cost ?? 0,
+        rating: s.interpreter_rating ?? null,
+        invoiceId: s.invoices?.[0]?.id ?? null,
+        hasRecording: false,
+      };
+    });
+
+    const totalCount = count || 0;
+    const totalPages = Math.ceil(totalCount / limit);
+
+    res.json({ sessions: mapped, totalCount, totalPages, page });
+  } catch (err) {
+    logger.error({ err }, 'Session history error');
+    res.status(500).json({ error: 'Failed to load session history' });
+  }
+});
+
 // ── GET /v1/sessions/:id ───────────────────────────────────────────────────────
 router.get('/sessions/:id', requireAuth, async (req, res) => {
   try {
