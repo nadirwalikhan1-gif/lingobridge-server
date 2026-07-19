@@ -221,8 +221,15 @@ export function interpreterDashboardHandler(io, socket) {
     if (!userId) return;
 
     try {
-      const interpreter = await getInterpreterByUserId(userId);
-      const sessions = await getSessionsByInterpreter(interpreter.id, limit, offset);
+      // FIX: was getSessionsByInterpreter(interpreter.id, ...) — interpreter.id
+      // is the interpreters table's own PK, but claimSessionForInterpreter
+      // (sessionRepo.mjs) writes sessions.interpreter_id = socket.userId
+      // directly (see acceptHandler.mjs), i.e. the raw user id, not
+      // interpreters.id. Passing interpreter.id meant this matched zero
+      // rows for every interpreter, always — the whole feature silently
+      // returned empty. getInterpreterByUserId() call below is now only
+      // used for other data (rates, etc.), not as the id for this lookup.
+      const sessions = await getSessionsByInterpreter(userId, limit, offset);
 
       // Real per-session earnings from the transaction ledger — not
       // estimated from rate * duration, which wouldn't reflect holds,
@@ -548,7 +555,11 @@ export function interpreterDashboardHandler(io, socket) {
 
     try {
       const interpreter = await getInterpreterByUserId(userId);
-      const sessions = await getSessionsByInterpreter(interpreter.id, 1000, 0);
+      // FIX: same bug as get-session-history above — sessions.interpreter_id
+      // is the user id, not interpreters.id. getPayoutsByInterpreter below
+      // is untouched — payouts is a different table and interpreter.id may
+      // genuinely be its correct FK there; only the sessions lookup was wrong.
+      const sessions = await getSessionsByInterpreter(userId, 1000, 0);
       const transactions = await getTransactionsByUser(userId, 1000, 0, 'interpreter');
       const payouts = await getPayoutsByInterpreter(interpreter.id);
 

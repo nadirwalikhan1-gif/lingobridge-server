@@ -7,6 +7,7 @@ import { getAvailableBalance } from '../db/walletRepo.mjs';
 import { createSupportTicket } from '../db/supportTicketRepo.mjs';
 import { sendEmail } from '../services/notificationService.mjs';
 import { logger } from '../config/logger.mjs';
+import { strictLimiter } from '../middleware/rateLimiter.mjs';
 
 const router = Router();
 
@@ -182,6 +183,237 @@ router.get('/sessions/upcoming', requireAuth, async (req, res) => {
 });
 
 // ── GET /v1/sessions ───────────────────────────────────────────────────────────
+// ── GET /v1/sessions/history ─────────────────────────────────────────────────
+// FIX: the client SessionHistory page (src/features/client/pages/
+// SessionHistory.jsx) calls GET /v1/sessions/history, which has never
+// existed as its own route. Because Express matches routes in registration
+// order and GET /v1/sessions/:id is registered below, "/sessions/history"
+// was silently matched by that handler instead, with :id literally equal to
+// the string "history" — which obviously isn't a real session id, so it
+// 404'd with { error: 'Session not found' }. That's the exact message shown
+// on the page. Registering '/sessions/history' explicitly, before
+// '/sessions/:id', fixes the collision (Express matches the more specific
+// literal route first when it's declared earlier).
+//
+// Revision note: an earlier version of this route (and a separate pass by
+// another tool) both looked up interpreter names via
+// .from('interpreters').in('id', interpreterIds) — that's wrong.
+// sessions.interpreter_id is written as the raw user id (see
+// claimSessionForInterpreter in sessionRepo.mjs, called with socket.userId
+// in acceptHandler.mjs), not interpreters.id. Fixed to query .from('users')
+// directly. Also fixed: search must run server-side, inside the same query
+// that gets paginated — applying it in JS after .range() only searches
+// whatever 10 rows happened to land on the current page, and leaves
+// totalCount/totalPages describing the unfiltered set. Search now resolves
+// matching interpreter names to user ids first, then folds that into one
+// .or() alongside language/purpose, before .range() runs.
+router.get('/sessions/history', requireAuth, async (req, res) => {
+  try {
+    const page   = parseInt(req.query.page)  || 1;
+    const limit  = parseInt(req.query.limit) || 20;
+    const offset = (page - 1) * limit;
+
+    let query = supabaseAdmin
+      .from('sessions')
+      .select('*', { count: 'exact' })
+      .eq('client_id', req.user.id);
+
+    // Date range filter — on created_at (always populated) rather than
+    // started_at, which is null for any session that was cancelled/expired
+    // before an interpreter connected. Filtering by started_at would make
+    // those silently disappear from every date filter except "All Time".
+    const dateFilter = req.query.dateFilter;
+    if (dateFilter && dateFilter !== 'all') {
+      const now = new Date();
+      const start = new Date(now);
+      if (dateFilter === 'today')      start.setHours(0, 0, 0, 0);
+      else if (dateFilter === 'week')  start.setDate(now.getDate() - 7);
+      else if (dateFilter === 'month') start.setMonth(now.getMonth() - 1);
+      else if (dateFilter === 'year')  start.setFullYear(now.getFullYear() - 1);
+      query = query.gte('created_at', start.toISOString());
+    }
+
+    // Call type filter
+    if (req.query.type && req.query.type !== 'all') {
+      query = query.eq('session_type', req.query.type);
+    }
+
+    // Free-text search — language pair, purpose/category, AND interpreter
+    // name. Interpreter name isn't a column on sessions, so resolve it to a
+    // set of matching user ids first, then fold everything into one .or()
+    // that runs as part of the same paginated query — this has to happen
+    // before .range() below, not after, or pagination/count go wrong the
+    // moment there's more than one page of results.
+    const term = (req.query.search || '').trim();
+    if (term) {
+      const { data: matchingUsers } = await supabaseAdmin
+        .from('users')
+        .select('id')
+        .ilike('full_name', `%${term}%`);
+      const nameMatchIds = (matchingUsers || []).map((u) => u.id);
+
+      const clauses = [`language.ilike.%${term}%`, `purpose.ilike.%${term}%`];
+      if (nameMatchIds.length > 0) {
+        clauses.push(`interpreter_id.in.(${nameMatchIds.join(',')})`);
+      }
+      query = query.or(clauses.join(','));
+    }
+
+    // Sort. date_desc/date_asc/duration_desc are real, reliably-populated
+    // columns and sort correctly server-side. price_desc/price_asc and
+    // rating_desc are deliberately NOT wired here: `cost` exists as a
+    // column but nothing in this codebase ever writes to it (grepped every
+    // service/repo file — zero write sites), so it's effectively always
+    // null; the real price only exists computed from the transactions
+    // ledger below, and rating lives in a separate session_ratings table.
+    // Sorting the full dataset by either needs a join .order() can't do —
+    // so instead of silently returning date-sorted results while claiming
+    // to honor a price/rating sort, those two stay disabled client-side
+    // (see SessionHistory.jsx) until that join exists.
+    const sortBy = req.query.sortBy;
+    if (sortBy === 'date_asc') query = query.order('created_at', { ascending: true });
+    else if (sortBy === 'duration_desc') query = query.order('duration_minutes', { ascending: false, nullsFirst: false });
+    else query = query.order('created_at', { ascending: false }); // date_desc default
+
+    query = query.range(offset, offset + limit - 1);
+
+    const { data, error, count } = await query;
+    if (error) throw error;
+    const sessions = data || [];
+
+    // Interpreter name/initials — SessionHistory.jsx renders
+    // s.interpreter.name / s.interpreter.initials, which aren't columns on
+    // sessions itself. Queries users directly (see revision note above).
+    const interpreterIds = [...new Set(sessions.map((s) => s.interpreter_id).filter(Boolean))];
+    let interpreterById = {};
+    if (interpreterIds.length > 0) {
+      const { data: interpreters } = await supabaseAdmin
+        .from('users')
+        .select('id, full_name')
+        .in('id', interpreterIds);
+      interpreterById = (interpreters || []).reduce((acc, u) => {
+        const name = u.full_name ?? 'Interpreter';
+        acc[u.id] = { name, initials: name.split(' ').map((p) => p[0]).slice(0, 2).join('').toUpperCase() };
+        return acc;
+      }, {});
+    }
+
+    // Real price paid, from the transaction ledger — see note above on why
+    // the `cost` column isn't used.
+    const sessionIds = sessions.map((s) => s.id);
+    let priceBySession = {};
+    if (sessionIds.length > 0) {
+      const { data: txns } = await supabaseAdmin
+        .from('transactions')
+        .select('session_id, amount')
+        .eq('user_id', req.user.id)
+        .eq('vault_type', 'client')
+        .in('session_id', sessionIds);
+      priceBySession = (txns || []).reduce((acc, t) => {
+        acc[t.session_id] = (acc[t.session_id] || 0) + Math.abs(Number(t.amount || 0));
+        return acc;
+      }, {});
+    }
+
+    // Rating — lives in session_ratings, not on sessions.
+    let ratingBySession = {};
+    if (sessionIds.length > 0) {
+      const { data: ratings } = await supabaseAdmin
+        .from('session_ratings')
+        .select('session_id, interpreter_rating')
+        .in('session_id', sessionIds);
+      ratingBySession = (ratings || []).reduce((acc, r) => {
+        acc[r.session_id] = r.interpreter_rating;
+        return acc;
+      }, {});
+    }
+
+    const enriched = sessions.map((s) => ({
+      ...s,
+      type:        s.session_type,
+      date:        new Date(s.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+      duration:    s.duration_minutes ?? null,
+      price:       priceBySession[s.id] ?? 0,
+      rating:      ratingBySession[s.id] ?? null,
+      interpreter: s.interpreter_id ? interpreterById[s.interpreter_id] : null,
+    }));
+
+    res.json({
+      sessions: enriched,
+      totalCount: count || 0,
+      totalPages: Math.max(1, Math.ceil((count || 0) / limit)),
+      page,
+      limit,
+    });
+  } catch (err) {
+    // FIX: a separate pass at one point changed this to res.status(200) with
+    // an `error` field embedded in the body on failure, reasoning that the
+    // UI could show "no sessions" instead of crashing. That backfires: this
+    // app's fetch wrapper (api.js) only throws on a non-ok status, so a 200
+    // here means useQuery's error state can never be set by a real backend
+    // failure — a genuine DB error would render identically to "you have no
+    // sessions," invisible to both the user and (per there being no error
+    // monitoring yet) anyone else. A real failure should look like one.
+    logger.error({ err }, 'Session history error');
+    res.status(500).json({ error: 'Failed to load session history' });
+  }
+});
+
+// ── GET /v1/sessions/export ──────────────────────────────────────────────────
+// FIX: SessionHistory.jsx's CSV export button called POST /v1/sessions/export,
+// which never existed. CSV is cheap to build correctly with what's already
+// stored (unlike PDF/invoice/recording — see the note on those three in
+// SessionHistory.jsx, none of which have any backend support to build on:
+// no PDF library in this project, no invoice records, no call recording
+// storage). Reuses the same filter logic as /sessions/history.
+router.get('/sessions/export', requireAuth, async (req, res) => {
+  try {
+    let query = supabaseAdmin
+      .from('sessions')
+      .select('*')
+      .eq('client_id', req.user.id)
+      .order('created_at', { ascending: false });
+
+    const dateFilter = req.query.dateFilter;
+    if (dateFilter && dateFilter !== 'all') {
+      const now = new Date();
+      const start = new Date(now);
+      if (dateFilter === 'today')      start.setHours(0, 0, 0, 0);
+      else if (dateFilter === 'week')  start.setDate(now.getDate() - 7);
+      else if (dateFilter === 'month') start.setMonth(now.getMonth() - 1);
+      else if (dateFilter === 'year')  start.setFullYear(now.getFullYear() - 1);
+      query = query.gte('created_at', start.toISOString());
+    }
+    if (req.query.type && req.query.type !== 'all') {
+      query = query.eq('session_type', req.query.type);
+    }
+
+    const { data, error } = await query;
+    if (error) throw error;
+
+    const rows = [
+      ['Date', 'Language From', 'Language To', 'Type', 'Category', 'Duration (min)', 'Status'],
+      ...(data || []).map((s) => [
+        s.created_at,
+        s.language ?? '',
+        s.to_language ?? '',
+        s.session_type ?? '',
+        s.purpose ?? '',
+        s.duration_minutes ?? '',
+        s.status ?? '',
+      ]),
+    ];
+    const csv = rows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="session-history.csv"');
+    res.send(csv);
+  } catch (err) {
+    logger.error({ err }, 'Session export error');
+    res.status(500).json({ error: 'Failed to export sessions' });
+  }
+});
+
 router.get('/sessions', requireAuth, async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
@@ -218,156 +450,6 @@ router.post('/sessions/rebook', requireAuth, async (req, res) => {
   } catch (err) {
     logger.error({ err }, 'Rebook error');
     res.status(500).json({ error: 'Failed to rebook session' });
-  }
-});
-
-// ── GET /v1/sessions/history ─────────────────────────────────────────────────
-// Dedicated history endpoint with filtering, sorting, and pagination.
-// MUST be registered BEFORE /v1/sessions/:id so Express doesn't treat
-// "history" as a session ID.
-router.get('/sessions/history', requireAuth, async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const page   = parseInt(req.query.page)  || 1;
-    const limit  = parseInt(req.query.limit) || 10;
-    const offset = (page - 1) * limit;
-
-    const dateFilter = req.query.dateFilter || 'all';
-    const typeFilter = req.query.type       || 'all';
-    const sortBy     = req.query.sortBy     || 'date_desc';
-    const search     = req.query.search     || '';
-
-    // Build the base query — match the pattern used in /v1/sessions above
-    let query = supabaseAdmin
-      .from('sessions')
-      .select('*', { count: 'exact' })
-      .eq('client_id', userId);
-
-    // Type filter (audio / video)
-    if (typeFilter && typeFilter !== 'all') {
-      query = query.eq('session_type', typeFilter);
-    }
-
-    // Date filter on started_at (or created_at as fallback)
-    const now = new Date();
-    if (dateFilter === 'today') {
-      const start = new Date(now); start.setHours(0,0,0,0);
-      query = query.gte('started_at', start.toISOString());
-    } else if (dateFilter === 'week') {
-      const start = new Date(now); start.setDate(now.getDate() - 7);
-      query = query.gte('started_at', start.toISOString());
-    } else if (dateFilter === 'month') {
-      const start = new Date(now); start.setDate(1); start.setHours(0,0,0,0);
-      query = query.gte('started_at', start.toISOString());
-    } else if (dateFilter === 'year') {
-      const start = new Date(now); start.setMonth(0,1); start.setHours(0,0,0,0);
-      query = query.gte('started_at', start.toISOString());
-    }
-
-    // Sorting — use started_at as primary, fall back to created_at
-    const sortMap = {
-      date_desc:     { column: 'started_at', ascending: false },
-      date_asc:      { column: 'started_at', ascending: true },
-      price_desc:    { column: 'cost', ascending: false },
-      price_asc:     { column: 'cost', ascending: true },
-      duration_desc: { column: 'duration_minutes', ascending: false },
-      rating_desc:   { column: 'started_at', ascending: false }, // fallback since rating lives on session_ratings
-    };
-    const sort = sortMap[sortBy] || sortMap.date_desc;
-    query = query.order(sort.column, { ascending: sort.ascending });
-
-    // Pagination
-    query = query.range(offset, offset + limit - 1);
-
-    const { data: sessionsData, error, count } = await query;
-    if (error) {
-      logger.error({ error, userId }, 'Session history query error');
-      throw error;
-    }
-
-    // Fetch interpreter names + ratings in a second batch (avoid complex joins that can 500)
-    const interpreterIds = [...new Set((sessionsData || []).map(s => s.interpreter_id).filter(Boolean))];
-    let interpreterMap = {};
-    let ratingsMap = {};
-
-    if (interpreterIds.length > 0) {
-      const { data: interpreters } = await supabaseAdmin
-        .from('users')
-        .select('id, full_name, avatar_url')
-        .in('id', interpreterIds);
-
-      interpreterMap = Object.fromEntries(
-        (interpreters || []).map(i => [i.id, i])
-      );
-
-      // Fetch ratings for these sessions
-      const sessionIds = (sessionsData || []).map(s => s.id);
-      const { data: ratings } = await supabaseAdmin
-        .from('session_ratings')
-        .select('session_id, interpreter_rating')
-        .in('session_id', sessionIds);
-
-      ratingsMap = Object.fromEntries(
-        (ratings || []).map(r => [r.session_id, r.interpreter_rating])
-      );
-    }
-
-    // Search filter (client-side on name/language)
-    let sessions = sessionsData || [];
-    if (search.trim()) {
-      const q = search.toLowerCase();
-      sessions = sessions.filter(s => {
-        const interp = interpreterMap[s.interpreter_id];
-        return (
-          (interp?.full_name ?? '').toLowerCase().includes(q) ||
-          (s.language ?? '').toLowerCase().includes(q)
-        );
-      });
-    }
-
-    // Map to the shape SessionHistory.jsx expects
-    const mapped = sessions.map(s => {
-      const interp = interpreterMap[s.interpreter_id];
-      const fullName = interp?.full_name ?? 'Unknown Interpreter';
-      const initials = fullName.split(' ').map(n => n[0]).join('').slice(0,2).toUpperCase();
-      return {
-        id: s.id,
-        interpreter: {
-          name: fullName,
-          initials,
-        },
-        type: s.session_type,
-        language: s.language ?? '',
-        status: s.status,
-        date: s.started_at ? new Date(s.started_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '',
-        duration: s.duration_minutes ?? s.duration ?? 0,
-        price: s.cost ?? s.price ?? 0,
-        rating: ratingsMap[s.id] ?? null,
-        invoiceId: null, // TODO: link when invoices table is ready
-        hasRecording: false,
-      };
-    });
-
-    const totalCount = count || 0;
-    const totalPages = Math.ceil(totalCount / limit);
-
-    // Always return a valid object even if everything is empty
-    res.json({
-      sessions: mapped || [],
-      totalCount: totalCount || 0,
-      totalPages: totalPages || 1,
-      page: page || 1,
-    });
-  } catch (err) {
-    logger.error({ err, userId: req.user?.id }, 'Session history error');
-    // Return 200 with empty data rather than 500, so the UI can show "No sessions" instead of crashing
-    res.status(200).json({
-      sessions: [],
-      totalCount: 0,
-      totalPages: 1,
-      page: 1,
-      error: err.message,
-    });
   }
 });
 
@@ -638,14 +720,9 @@ router.get('/interpreters', requireAuth, async (req, res) => {
     // admin.mjs, registerHandler.mjs) uses 'interpreters'. This endpoint has
     // likely never returned real data, which is why the client booking flow
     // ended up with a hardcoded interpreter list instead.
-    // FIX: added years_experience, certifications, specialties, is_verified
-    // (was already selected, now also mapped through) — needed for the
-    // trust-building profile rebuild. Select list stays intentionally
-    // narrow rather than 'select(*)' so the compact card payload doesn't
-    // balloon; the full detail endpoint below fetches everything.
     let query = supabaseAdmin
       .from('interpreters')
-      .select('user_id, languages, rating, price_per_minute, bio, is_verified, is_available, years_experience, specialties, users(full_name, avatar_url)')
+      .select('user_id, languages, rating, price_per_minute, bio, is_verified, is_available, users(full_name, avatar_url)')
       .eq('is_available', true)
       .eq('is_verified', true);
 
@@ -659,63 +736,21 @@ router.get('/interpreters', requireAuth, async (req, res) => {
     if (error) throw error;
 
     const interpreters = (data || []).map((i) => ({
-      id:              i.user_id,
-      name:            i.users?.full_name ?? 'Unknown',
-      avatar:          i.users?.avatar_url ?? null,
-      languages:       i.languages || [],
-      rating:          i.rating || 0,
-      bio:             i.bio || '',
-      verified:        i.is_verified,
-      online:          i.is_available,
-      ratePerMin:      i.price_per_minute || null,
-      yearsExperience: i.years_experience || 0,
-      specialties:     i.specialties || [],
+      id:         i.user_id,
+      name:       i.users?.full_name ?? 'Unknown',
+      avatar:     i.users?.avatar_url ?? null,
+      languages:  i.languages || [],
+      rating:     i.rating || 0,
+      bio:        i.bio || '',
+      verified:   i.is_verified,
+      online:     i.is_available,
+      ratePerMin: i.price_per_minute || null,
     }));
 
     res.json({ interpreters });
   } catch (err) {
     logger.error({ err }, 'Interpreters error');
     res.json({ interpreters: [] });
-  }
-});
-
-// ── GET /v1/interpreters/:id ─────────────────────────────────────────────────
-// FIX: new endpoint — powers the "View full profile" detail view on client
-// booking cards (InterpreterProfileModal.jsx). The compact list above
-// intentionally omits certifications and full bio length to keep the list
-// payload small; this fetches the complete profile for one interpreter.
-router.get('/interpreters/:id', requireAuth, async (req, res) => {
-  try {
-    const { data, error } = await supabaseAdmin
-      .from('interpreters')
-      .select('user_id, languages, rating, price_per_minute, bio, is_verified, is_available, years_experience, certifications, specialties, users(full_name, avatar_url, created_at)')
-      .eq('user_id', req.params.id)
-      .single();
-
-    if (error || !data) return res.status(404).json({ error: 'Interpreter not found' });
-
-    res.json({
-      id:              data.user_id,
-      name:            data.users?.full_name ?? 'Unknown',
-      avatar:          data.users?.avatar_url ?? null,
-      languages:       data.languages || [],
-      rating:          data.rating || 0,
-      bio:             data.bio || '',
-      verified:        data.is_verified,
-      online:          data.is_available,
-      ratePerMin:      data.price_per_minute || null,
-      yearsExperience: data.years_experience || 0,
-      // FIX: never send filePath to a client-facing endpoint — it's a
-      // private storage path to a personal document (see
-      // migration-certification-proof-docs.sql). Only the certification
-      // name and whether an admin has verified it are ever public.
-      certifications:  (data.certifications || []).map(c => ({ name: c.name, verified: c.verified })),
-      specialties:     data.specialties || [],
-      memberSince:     data.users?.created_at ?? null,
-    });
-  } catch (err) {
-    logger.error({ err, id: req.params.id }, 'Interpreter detail error');
-    res.status(500).json({ error: 'Failed to load interpreter profile' });
   }
 });
 
@@ -1302,59 +1337,12 @@ router.post('/users/me/avatar', requireAuth, upload.single('avatar'), async (req
   }
 });
 
-// FIX: separate multer instance from the avatar one above — certification
-// proof documents are commonly PDFs (scanned certificates), not just images.
-const uploadCertDoc = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB — scanned certs can be larger than a profile photo
-  fileFilter: (req, file, cb) => {
-    const allowed = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
-    if (!allowed.includes(file.mimetype)) {
-      return cb(new Error('Only JPEG, PNG, WebP, or PDF files are allowed'));
-    }
-    cb(null, true);
-  },
-});
-
-// ── POST /v1/interpreters/me/certification-file ──────────────────────────────
-// Requires a PRIVATE Supabase Storage bucket named "certification-docs" —
-// see migration-certification-proof-docs.sql, which creates it with
-// public=false. Unlike the avatar endpoint above, this deliberately does
-// NOT return a public URL — certification proof documents are personal
-// records (they often contain a full name, license numbers, etc.) and
-// should never be reachable by an unauthenticated guess at the file path.
-// Returns only the storage path; the frontend then calls
-// get-interpreter-profile over the socket to receive a short-lived signed
-// URL for actually viewing/downloading it (see
-// interpreterDashboardHandler.mjs).
-router.post('/interpreters/me/certification-file', requireAuth, uploadCertDoc.single('file'), async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'No file uploaded' });
-    }
-
-    const ext = req.file.originalname.split('.').pop() || 'pdf';
-    const path = `${req.user.id}/${Date.now()}.${ext}`;
-
-    const { error: uploadErr } = await supabaseAdmin.storage
-      .from('certification-docs')
-      .upload(path, req.file.buffer, {
-        contentType: req.file.mimetype,
-        upsert: false, // each cert's proof gets its own timestamped path, never overwrite
-      });
-
-    if (uploadErr) throw uploadErr;
-
-    logger.info({ userId: req.user.id }, 'Certification document uploaded');
-    res.json({ data: { filePath: path } });
-  } catch (err) {
-    logger.error({ err, userId: req.user.id }, 'Certification document upload failed');
-    res.status(500).json({ error: err.message || 'Failed to upload certification document' });
-  }
-});
-
 // ── PUT /v1/users/me/password ──────────────────────────────────────────────────
-router.put('/users/me/password', requireAuth, async (req, res) => {
+// FIX: this does a live sign-in attempt to verify the current password
+// (see below), which makes it a password-guessing oracle — it only had the
+// generic 100 req/min app-wide limit. Moved to the strictLimiter tier
+// (20 req/min) that checkout/Agora already get.
+router.put('/users/me/password', strictLimiter, requireAuth, async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body;
 
@@ -1427,13 +1415,13 @@ router.post('/users/me/export', requireAuth, async (req, res) => {
 // review, matching how account deletion is presented to the user ("request
 // submitted"). Actual deletion should always be a deliberate admin action,
 // never an automatic one, given financial/session history implications.
-router.post('/users/me/delete-request', requireAuth, async (req, res) => {
+router.post('/users/me/delete-request', strictLimiter, requireAuth, async (req, res) => {
   try {
     const { reason } = req.body;
 
     const ticket = await createSupportTicket({
       userId:  req.user.id,
-      role:    'client',
+      role:    (req.user.app_metadata?.role || req.user.user_metadata?.role) ?? 'client',
       subject: 'Account Deletion Request',
       message: reason ? `Reason given: ${reason}` : 'No reason given',
     });
