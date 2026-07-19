@@ -3,10 +3,21 @@
 
 import { supabaseAdmin } from '../../config/supabase.mjs';
 import { logger } from '../../config/logger.mjs';
-import { getPendingRooms, getRoom, deleteRoom } from '../runtime/sessionRuntime.mjs';
-import { releaseReservation } from '../../db/walletRepo.mjs';
-import { updateSessionStatus } from '../../db/sessionRepo.mjs';
+import { v4 as uuidv4 } from 'uuid';
+import { getPendingRooms, getRoom, deleteRoom, addRoom, updateRoom } from '../runtime/sessionRuntime.mjs';
+import { releaseReservation, reserveFunds, getAvailableBalance } from '../../db/walletRepo.mjs';
+import { createSession, updateSessionStatus } from '../../db/sessionRepo.mjs';
+import { getInterpreterByUserId } from '../../db/interpreterRepo.mjs';
+import { generateAgoraToken } from '../../services/agoraService.mjs';
+import { CLIENT_RATES } from '../../utils/constants.mjs';
+import { emitToUser } from '../../utils/socketUtils.mjs';
 import { eventBus, EVENTS } from '../../utils/eventBus.mjs';
+
+// Same window used for a client's own preferred-interpreter selection in
+// requestHandler.mjs — kept identical so this reuses that file's existing
+// accept/expire/fallback-to-broadcast logic untouched, rather than
+// inventing a second, parallel version of it here.
+const PREFERRED_INTERPRETER_WINDOW_MS = 20_000;
 
 async function getPlatformStats() {
   const [activeSessions, interpretersOnline, openDisputes] = await Promise.all([
@@ -240,6 +251,112 @@ export function registerAdminHandlers(io, socket) {
       logger.info({ requestId, adminId: socket.userId }, 'Admin skipped/cancelled request');
     } catch (e) {
       logger.error(e, 'admin-skip-request error');
+    }
+  });
+
+  // ── ADMIN MANUALLY CREATES + ASSIGNS A SESSION ─────────────────────────────
+  // FIX: the "+ Assign session" button on the admin dashboard had no
+  // onClick handler at all. This is a genuinely different action from
+  // admin-assign-interpreter above (which just re-broadcasts an EXISTING
+  // pending request) — this creates a brand new session from scratch for a
+  // client + interpreter the admin picks directly (e.g. a VIP client, or an
+  // edge case outside the normal booking flow).
+  //
+  // Deliberately reuses the exact same primitives requestHandler.mjs's
+  // request-call uses (createSession, reserveFunds, generateAgoraToken,
+  // addRoom with a preferredInterpreterId window) rather than inventing a
+  // parallel "instant assign" path — that means this goes through the same
+  // already-tested accept/expire/fallback-to-broadcast logic in
+  // acceptHandler.mjs and jobs/requestTimeouts.mjs for free, instead of a
+  // second, divergent implementation of the same thing.
+  socket.on('admin-create-assignment', async ({ clientId, interpreterId, language, toLang, sessionType, purpose, duration } = {}) => {
+    try {
+      if (!clientId || !interpreterId || !language || !sessionType) {
+        socket.emit('admin-assignment-result', { ok: false, reason: 'Client, interpreter, language, and session type are required' });
+        return;
+      }
+
+      const interpreter = await getInterpreterByUserId(interpreterId).catch(() => null);
+      if (!interpreter) {
+        socket.emit('admin-assignment-result', { ok: false, reason: 'Selected interpreter not found' });
+        return;
+      }
+
+      const wallet = await getAvailableBalance(clientId, 'client');
+      const ratePerMin = CLIENT_RATES.USD[sessionType] ?? 1.49;
+      if (wallet.availableBalance < ratePerMin) {
+        socket.emit('admin-assignment-result', {
+          ok: false,
+          reason: `Client's wallet balance ($${wallet.availableBalance.toFixed(2)}) is below the $${ratePerMin.toFixed(2)} minimum for a ${sessionType} session.`,
+        });
+        return;
+      }
+
+      const roomId = uuidv4();
+      const bookedDuration = parseInt(duration) * 60 || 1800;
+
+      await reserveFunds(clientId, ratePerMin, 'client');
+      eventBus.emit(EVENTS.WALLET_CREDITED, { userId: clientId, ...await getAvailableBalance(clientId, 'client') });
+
+      const session = await createSession({
+        clientId,
+        language,
+        toLang,
+        purpose:      purpose ?? 'general',
+        sessionType,
+        currency:     wallet.currency ?? 'USD',
+        agoraChannel: roomId,
+        bookedDuration,
+        duration,
+      });
+
+      let agoraToken = null;
+      try {
+        agoraToken = generateAgoraToken(roomId).token;
+      } catch (e) {
+        logger.warn({ e }, 'Agora token generation failed for admin-created assignment — client will retry');
+      }
+
+      addRoom(roomId, {
+        clientSocketId: null, // admin created this, not the client's own socket
+        clientUserId:   clientId,
+        sessionId:      session.id,
+        reservedAmount: ratePerMin,
+        channelName:    roomId,
+        createdAt:      Date.now(),
+        preferredInterpreterId: interpreterId,
+        preferredUntil:         Date.now() + PREFERRED_INTERPRETER_WINDOW_MS,
+        requestData: {
+          language, fromLang: language, toLang, sessionType, duration,
+          category: purpose, interpreterId, roomId, channelName: roomId,
+          adminAssigned: true,
+        },
+      });
+
+      const requestPayload = {
+        roomId, channelName: roomId, language, fromLang: language, toLang,
+        sessionType, duration, category: purpose, clientName: 'Client', adminAssigned: true,
+      };
+
+      // Client wasn't the one connected/emitting here, unlike the normal
+      // flow, so this needs a targeted emit rather than socket.emit().
+      emitToUser(io, clientId, 'call-requested', { roomId, sessionId: session.id, channelName: roomId, agoraToken, sessionType });
+      emitToUser(io, interpreterId, 'new-request', requestPayload);
+      io.to('admins').emit('new-request', requestPayload);
+
+      setTimeout(() => {
+        const room = getRoom(roomId);
+        if (!room || room.interpreterSocketId) return;
+        updateRoom(roomId, { preferredInterpreterId: null, preferredUntil: null });
+        io.to('interpreters').emit('new-request', requestPayload);
+        logger.info({ roomId, interpreterId }, 'Admin-assigned interpreter window expired — broadcasting to all');
+      }, PREFERRED_INTERPRETER_WINDOW_MS);
+
+      socket.emit('admin-assignment-result', { ok: true, sessionId: session.id, roomId });
+      logger.info({ adminId: socket.userId, clientId, interpreterId, sessionId: session.id }, 'Admin created manual session assignment');
+    } catch (e) {
+      logger.error(e, 'admin-create-assignment error');
+      socket.emit('admin-assignment-result', { ok: false, reason: 'Failed to create the session — please try again' });
     }
   });
 
