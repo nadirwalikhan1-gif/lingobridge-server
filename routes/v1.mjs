@@ -1337,6 +1337,60 @@ router.post('/users/me/avatar', requireAuth, upload.single('avatar'), async (req
   }
 });
 
+// FIX: separate multer instance from the avatar one above — certification
+// proof documents are commonly PDFs (scanned certificates), not just images.
+const uploadCertDoc = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB — scanned certs can be larger than a profile photo
+  fileFilter: (req, file, cb) => {
+    const allowed = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
+    if (!allowed.includes(file.mimetype)) {
+      return cb(new Error('Only JPEG, PNG, WebP, or PDF files are allowed'));
+    }
+    cb(null, true);
+  },
+});
+
+// ── POST /v1/interpreters/me/certification-file ──────────────────────────────
+// Requires a PRIVATE Supabase Storage bucket named "certification-docs" —
+// create it in the Supabase dashboard: Storage → New bucket → name it
+// exactly "certification-docs" → leave "Public" UNCHECKED. Unlike the
+// avatar endpoint above, this deliberately does NOT return a public URL —
+// certification proof documents are personal records (they often contain a
+// full name, license numbers, etc.) and should never be reachable by an
+// unauthenticated guess at the file path. Returns only the storage path;
+// the frontend then requests a short-lived signed URL to actually view it.
+//
+// FIX: this route was missing entirely from the deployed server — the
+// frontend (interpreter Profile page) has always called this exact path,
+// but nothing was registered to handle it, so every upload attempt hit the
+// generic 404 catch-all in server.mjs and failed with "Not found".
+router.post('/interpreters/me/certification-file', requireAuth, uploadCertDoc.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const ext = req.file.originalname.split('.').pop() || 'pdf';
+    const path = `${req.user.id}/${Date.now()}.${ext}`;
+
+    const { error: uploadErr } = await supabaseAdmin.storage
+      .from('certification-docs')
+      .upload(path, req.file.buffer, {
+        contentType: req.file.mimetype,
+        upsert: false, // each cert's proof gets its own timestamped path, never overwrite
+      });
+
+    if (uploadErr) throw uploadErr;
+
+    logger.info({ userId: req.user.id }, 'Certification document uploaded');
+    res.json({ data: { filePath: path } });
+  } catch (err) {
+    logger.error({ err, userId: req.user.id }, 'Certification document upload failed');
+    res.status(500).json({ error: err.message || 'Failed to upload certification document' });
+  }
+});
+
 // ── PUT /v1/users/me/password ──────────────────────────────────────────────────
 // FIX: this does a live sign-in attempt to verify the current password
 // (see below), which makes it a password-guessing oracle — it only had the
