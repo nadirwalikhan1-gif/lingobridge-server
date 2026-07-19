@@ -754,6 +754,113 @@ router.get('/interpreters', requireAuth, async (req, res) => {
   }
 });
 
+// ── GET /v1/interpreters/search ────────────────────────────────────────────────
+// Name/language search used by Messages ("new conversation") and Favourites.
+// Separate from GET /interpreters (which filters by language/category/session
+// type for the booking flow) since this is a free-text name search.
+//
+// FIX: moved here, immediately before /interpreters/:id — it used to sit
+// much further down the file (after /messages, /teams/*, /users/me/*), which
+// meant nothing wrong until /interpreters/:id got added below: once :id was
+// registered first, every request to /interpreters/search would get
+// captured by :id instead (with :id literally equal to "search"), 404ing
+// with "Interpreter not found" instead of running the search. Same class of
+// bug as /sessions/history vs /sessions/:id — a literal path has to be
+// registered before a same-depth :param route or the param route wins.
+router.get('/interpreters/search', requireAuth, async (req, res) => {
+  try {
+    const { q, limit = 20 } = req.query;
+
+    let query = supabaseAdmin
+      .from('interpreters')
+      .select('user_id, languages, rating, is_verified, users(full_name, avatar_url)')
+      .eq('is_available', true);
+
+    const { data, error } = await query.limit(parseInt(limit) || 20);
+    if (error) throw error;
+
+    const filtered = q
+      ? (data || []).filter(i => (i.users?.full_name ?? '').toLowerCase().includes(q.toLowerCase()))
+      : (data || []);
+
+    const interpreters = filtered.map(i => ({
+      id:       i.user_id,
+      name:     i.users?.full_name ?? 'Unknown',
+      avatar:   i.users?.avatar_url ?? null,
+      languages: i.languages ?? [],
+    }));
+
+    res.json({ data: { interpreters } });
+  } catch (err) {
+    logger.error({ err }, 'Interpreter search failed');
+    res.json({ data: { interpreters: [] } });
+  }
+});
+
+// ── GET /v1/interpreters/:id ─────────────────────────────────────────────────
+// FIX: powers "View full profile" on the booking page's interpreter cards
+// (InterpreterProfileModal.jsx) — that modal has always called this exact
+// path, but nothing was registered to handle it, so every click hit the
+// generic 404 catch-all in server.mjs.
+//
+// Built in two steps rather than one .select(): the core fields below are
+// confirmed present (they match the existing GET /interpreters list route
+// above exactly). years_experience/certifications/specialties are fetched
+// separately and non-fatally — if any of those columns don't actually exist
+// on this deployment's interpreters table, that second query fails alone
+// and gets logged, but the response still returns successfully with
+// everything confirmed to work. The frontend already renders every one of
+// these fields conditionally, so partial data degrades gracefully instead
+// of showing an error.
+router.get('/interpreters/:id', requireAuth, async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('interpreters')
+      .select('user_id, languages, rating, price_per_minute, bio, is_verified, is_available, users(full_name, avatar_url)')
+      .eq('user_id', req.params.id)
+      .single();
+
+    if (error || !data) return res.status(404).json({ error: 'Interpreter not found' });
+
+    const response = {
+      id:         data.user_id,
+      name:       data.users?.full_name ?? 'Unknown',
+      avatar:     data.users?.avatar_url ?? null,
+      languages:  data.languages || [],
+      rating:     data.rating || 0,
+      bio:        data.bio || '',
+      verified:   data.is_verified,
+      online:     data.is_available,
+      ratePerMin: data.price_per_minute || null,
+    };
+
+    try {
+      const { data: extra } = await supabaseAdmin
+        .from('interpreters')
+        .select('years_experience, certifications, specialties, users(created_at)')
+        .eq('user_id', req.params.id)
+        .single();
+      if (extra) {
+        response.yearsExperience = extra.years_experience || 0;
+        response.specialties     = extra.specialties || [];
+        // Never send filePath to a client-facing endpoint — it's a private
+        // storage path to a personal document (see
+        // migration-certification-proof-docs.sql). Only the certification
+        // name and whether an admin has verified it are ever public.
+        response.certifications  = (extra.certifications || []).map((c) => ({ name: c.name, verified: c.verified }));
+        response.memberSince     = extra.users?.created_at ?? null;
+      }
+    } catch (e) {
+      logger.warn({ e, id: req.params.id }, 'Optional interpreter profile fields unavailable — returning core profile only');
+    }
+
+    res.json(response);
+  } catch (err) {
+    logger.error({ err, id: req.params.id }, 'Interpreter detail error');
+    res.status(500).json({ error: 'Failed to load interpreter profile' });
+  }
+});
+
 // ── GET /v1/messages ─────────────────────────────────────────────────────────
 router.get('/messages', requireAuth, async (req, res) => {
   try {
@@ -1540,40 +1647,6 @@ router.post('/users/me/baa-request', requireAuth, async (req, res) => {
   } catch (err) {
     logger.error({ err, userId: req.user.id }, 'BAA request failed');
     res.status(500).json({ error: 'Failed to submit BAA request' });
-  }
-});
-
-// ── GET /v1/interpreters/search ────────────────────────────────────────────────
-// Name/language search used by Messages ("new conversation") and Favourites.
-// Separate from GET /interpreters (which filters by language/category/session
-// type for the booking flow) since this is a free-text name search.
-router.get('/interpreters/search', requireAuth, async (req, res) => {
-  try {
-    const { q, limit = 20 } = req.query;
-
-    let query = supabaseAdmin
-      .from('interpreters')
-      .select('user_id, languages, rating, is_verified, users(full_name, avatar_url)')
-      .eq('is_available', true);
-
-    const { data, error } = await query.limit(parseInt(limit) || 20);
-    if (error) throw error;
-
-    const filtered = q
-      ? (data || []).filter(i => (i.users?.full_name ?? '').toLowerCase().includes(q.toLowerCase()))
-      : (data || []);
-
-    const interpreters = filtered.map(i => ({
-      id:       i.user_id,
-      name:     i.users?.full_name ?? 'Unknown',
-      avatar:   i.users?.avatar_url ?? null,
-      languages: i.languages ?? [],
-    }));
-
-    res.json({ data: { interpreters } });
-  } catch (err) {
-    logger.error({ err }, 'Interpreter search failed');
-    res.json({ data: { interpreters: [] } });
   }
 });
 
