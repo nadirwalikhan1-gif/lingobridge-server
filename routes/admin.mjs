@@ -106,6 +106,66 @@ router.get('/users', requireAdmin, async (req, res) => {
   }
 });
 
+// ── GET /users/:id ────────────────────────────────────────────────────────────
+// FIX: "View" on the admin Users page had no onClick at all — new route.
+// Reuses the exact same three sources the list route above already reads
+// from (public users table, Auth admin API for real role/status, and the
+// transactions ledger for real spend), just scoped to one user via
+// auth.admin.getUserById() instead of listing up to 1000 accounts. Session
+// count and client spend use identical logic to the list route above, so
+// the numbers shown here always match what the list already displays —
+// this only adds detail the list doesn't have room for (phone,
+// organization, and interpreter earnings, which the list route
+// deliberately omits for non-clients).
+router.get('/users/:id', requireAdmin, async (req, res) => {
+  try {
+    const { data: user, error } = await supabaseAdmin
+      .from('users')
+      .select('id, full_name, email, phone, created_at, currency, profile_extra')
+      .eq('id', req.params.id)
+      .single();
+    if (error || !user) return res.status(404).json({ error: 'User not found' });
+
+    const { data: authData } = await supabaseAdmin.auth.admin.getUserById(req.params.id);
+    const authUser = authData?.user;
+    const role   = authUser?.app_metadata?.role || authUser?.user_metadata?.role || 'client';
+    const status = authUser?.user_metadata?.status || 'active';
+
+    const { data: sessions } = await supabaseAdmin
+      .from('sessions')
+      .select('id')
+      .eq(role === 'interpreter' ? 'interpreter_id' : 'client_id', req.params.id);
+
+    // Spend (client) vs earnings (interpreter) — same transactions-ledger
+    // pattern as the list route's 'spent' column above.
+    const { data: txns } = await supabaseAdmin
+      .from('transactions')
+      .select('amount')
+      .eq('user_id', req.params.id)
+      .eq('vault_type', role === 'interpreter' ? 'interpreter' : 'client');
+    const totalAmount = (txns || []).reduce((sum, t) => sum + Math.abs(Number(t.amount || 0)), 0);
+
+    res.json({
+      id:           user.id,
+      name:         user.full_name || 'Unknown',
+      email:        user.email || '',
+      initials:     initials(user.full_name),
+      phone:        user.phone || '',
+      role,
+      status,
+      currency:     user.currency || 'USD',
+      organization: user.profile_extra?.organization ?? '',
+      jobTitle:     user.profile_extra?.jobTitle ?? '',
+      joined:       new Date(user.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+      sessionsCount: sessions?.length || 0,
+      totalAmount,   // spent if client, earned if interpreter — label using `role` client-side
+    });
+  } catch (err) {
+    logger.error({ err, id: req.params.id }, 'Admin user detail error');
+    res.status(500).json({ error: 'Failed to load user' });
+  }
+});
+
 router.post('/users/:id/approve', requireAdmin, async (req, res) => {
   try {
     await supabaseAdmin.auth.admin.updateUserById(req.params.id, { user_metadata: { status: 'active' } });
@@ -221,6 +281,72 @@ router.get('/interpreters', requireAdmin, async (req, res) => {
   } catch (err) {
     logger.error({ err }, 'Admin interpreters error');
     res.status(500).json({ error: 'Failed to load interpreters' });
+  }
+});
+
+// ── GET /interpreters/:id ─────────────────────────────────────────────────────
+// FIX: "View" on the admin Interpreters page had no onClick at all — new
+// route. Built as a safe extension of the list route above — identical
+// select('*', users(...)) wildcard (can't fail on a missing named column,
+// unlike a hand-picked field list), scoped to one interpreter. Certification
+// file paths are resolved to short-lived signed URLs the same way
+// GET /certifications/pending below already does, so an admin can review a
+// document directly from this view too.
+router.get('/interpreters/:id', requireAdmin, async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('interpreters')
+      .select('*, users(full_name, email, created_at)')
+      .eq('user_id', req.params.id)
+      .single();
+    if (error || !data) return res.status(404).json({ error: 'Interpreter not found' });
+
+    const { data: sessions } = await supabaseAdmin
+      .from('sessions')
+      .select('id')
+      .eq('interpreter_id', req.params.id);
+
+    const { data: txns } = await supabaseAdmin
+      .from('transactions')
+      .select('amount')
+      .eq('user_id', req.params.id)
+      .eq('vault_type', 'interpreter');
+    const totalEarned = (txns || []).reduce((sum, t) => sum + Number(t.amount || 0), 0);
+
+    // Signed URLs for any certification that has a proof file attached —
+    // same 1hr expiry as the existing certification review queue below.
+    const certifications = await Promise.all(
+      (data.certifications || []).map(async (c) => {
+        if (!c.filePath) return { name: c.name, verified: c.verified, fileUrl: null };
+        const { data: signed } = await supabaseAdmin.storage
+          .from('certification-docs')
+          .createSignedUrl(c.filePath, 3600);
+        return { name: c.name, verified: c.verified, fileUrl: signed?.signedUrl ?? null };
+      })
+    );
+
+    res.json({
+      id:              data.user_id,
+      name:            data.users?.full_name || 'Unknown',
+      email:           data.users?.email || '',
+      initials:        initials(data.users?.full_name),
+      languages:       data.languages || [],
+      bio:             data.bio || '',
+      rating:          data.rating || 0,
+      ratePerMin:      data.price_per_minute || null,
+      isAvailable:     data.is_available,
+      isVerified:      data.is_verified,
+      status:          data.is_available ? 'online' : 'offline',
+      certifications,
+      specialties:     data.specialties || [],
+      yearsExperience: data.years_experience || 0,
+      joined:          new Date(data.users?.created_at || data.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+      sessionsCount:   sessions?.length || 0,
+      totalEarned,
+    });
+  } catch (err) {
+    logger.error({ err, id: req.params.id }, 'Admin interpreter detail error');
+    res.status(500).json({ error: 'Failed to load interpreter' });
   }
 });
 
