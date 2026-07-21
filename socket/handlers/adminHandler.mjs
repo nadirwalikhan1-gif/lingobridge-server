@@ -81,6 +81,18 @@ async function getInterpreterPresence() {
     isAvailable: i.is_available,
     languages:   i.languages ?? [],
     rating:      i.rating ?? 0,
+    // FIX: this never sent a `status` field at all, but the dashboard's
+    // InterpreterPresence.jsx widget does statusConfig[i.status].dot with
+    // no guard — i.status was always undefined, statusConfig[undefined]
+    // was always undefined, and .dot on that crashed the whole Overview
+    // page on the very first render once real data started flowing (this
+    // was masked until now by the separate ext-prop bug that kept this
+    // widget's data empty). Same fix already applied to the admin
+    // Interpreters list route in admin.mjs — can't distinguish "online but
+    // not in a call" from "busy in an active session" here either (would
+    // need a join against active sessions), so this only derives the two
+    // states available: is_available -> online, anything else -> offline.
+    status:      i.is_available ? 'online' : 'offline',
   }));
 }
 
