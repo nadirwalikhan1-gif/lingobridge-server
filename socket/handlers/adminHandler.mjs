@@ -36,7 +36,13 @@ async function getPlatformStats() {
 async function getLiveSessions() {
   const { data, error } = await supabaseAdmin
     .from('sessions')
-    .select('id, agora_channel, language, session_type, started_at, client_id, interpreter_id, users!sessions_client_id_fkey(full_name)')
+    // FIX: was missing to_language entirely — this function only ever
+    // selected `language` (the "from" side), so the admin Live Sessions
+    // widget's session.toLang was always undefined regardless of what the
+    // client actually booked. Session type also wasn't being consumed by
+    // the widget's language-pair display, but is needed elsewhere in this
+    // same response (type: s.session_type below), so left as-is.
+    .select('id, agora_channel, language, to_language, session_type, started_at, client_id, interpreter_id, users!sessions_client_id_fkey(full_name)')
     .eq('status', 'active')
     .order('started_at', { ascending: false })
     .limit(20);
@@ -45,7 +51,15 @@ async function getLiveSessions() {
   return (data || []).map(s => ({
     id:            s.id,
     channel:       s.agora_channel,
+    // FIX: LiveSessions.jsx (admin dashboard widget) reads session.fromLang
+    // and session.toLang as two separate fields — this used to only send a
+    // single `language` field (and never to_language at all), so toLang was
+    // always undefined for every session. Kept `language` too since it's
+    // possible something else still reads that single-field shape; adding
+    // fromLang/toLang alongside it rather than replacing it outright.
     language:      s.language,
+    fromLang:      s.language,
+    toLang:        s.to_language,
     type:          s.session_type,
     startedAt:     s.started_at,
     clientName:    s.users?.full_name ?? 'Unknown',
@@ -56,10 +70,24 @@ async function getLiveSessions() {
 
 async function getRequestQueue() {
   const pending = getPendingRooms();
+  // FIX: getPendingRooms() already flattens room.requestData onto each
+  // object (see sessionRuntime.mjs — { roomId, ...room.requestData }), so
+  // r.fromLang/r.toLang are genuinely present here. This mapping just never
+  // copied them into its returned shape — RequestQueue.jsx (admin dashboard
+  // widget) reads req.fromLang/req.toLang as two separate fields, so toLang
+  // was always undefined for every pending request. Same bug shape as
+  // getLiveSessions() above, different source (in-memory rooms vs DB).
   return pending.map(r => ({
     id:        r.requestId ?? r.id,
     language:  r.language,
-    purpose:   r.purpose,
+    fromLang:  r.fromLang ?? r.language,
+    toLang:    r.toLang,
+    // FIX: was `purpose: r.purpose` — r.purpose doesn't exist on this
+    // object (the real field from requestData is `category`, per
+    // requestHandler.mjs), and RequestQueue.jsx reads req.category, not
+    // req.purpose — wrong on both ends, so this badge has always been
+    // blank regardless of what category the client actually picked.
+    category:  r.category,
     type:      r.sessionType ?? r.type,
     clientId:  r.clientId,
     createdAt: r.createdAt ?? new Date().toISOString(),
