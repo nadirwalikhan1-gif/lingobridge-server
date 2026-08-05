@@ -15,8 +15,9 @@ const APP_URL = process.env.APP_URL || 'https://www.andiraw.com';
  * @param {string} userId
  * @param {number} amount — must be in TOPUP_AMOUNTS
  * @param {string} currency
+ * @param {string} [returnTo] — validated relative path (see routes/checkout.mjs)
  */
-export async function createCheckout(userId, amount, currency = 'USD') {
+export async function createCheckout(userId, amount, currency = 'USD', returnTo) {
   const validAmounts = TOPUP_AMOUNTS[currency] ?? TOPUP_AMOUNTS.USD;
   if (!validAmounts.includes(amount)) {
     throw new Error(`Invalid top-up amount: ${amount}. Allowed: ${validAmounts.join(', ')}`);
@@ -26,6 +27,18 @@ export async function createCheckout(userId, amount, currency = 'USD') {
   if (!variantId) {
     throw new Error(`LemonSqueezy variant not configured for ${currency} $${amount}. Set LS_VARIANT_${currency}_${amount} in Railway.`);
   }
+
+  // FIX: falls back to /client/dashboard when no valid returnTo was given,
+  // but now honors wherever the person actually started (booking, wallet,
+  // etc). ?checkout=success is a marker the frontend watches for on load —
+  // the webhook that actually credits the wallet runs server-to-server,
+  // independently of this browser redirect, so there's a real possibility
+  // the redirect completes a moment before the webhook does. The marker
+  // tells the frontend "you just paid — actively confirm the balance
+  // landed" instead of trusting a single fetch-on-mount to have caught it.
+  const path = returnTo || '/client/dashboard';
+  const separator = path.includes('?') ? '&' : '?';
+  const redirectUrl = `${APP_URL}${path}${separator}checkout=success`;
 
   const { data, error } = await lsCreateCheckout(
     process.env.LEMONSQUEEZY_STORE_ID,
@@ -38,12 +51,8 @@ export async function createCheckout(userId, amount, currency = 'USD') {
           currency,
         },
       },
-      // FIX: previously missing entirely — without this, LemonSqueezy has
-      // no way to know where to send the customer after a successful
-      // payment, so they were left stranded on LemonSqueezy's own generic
-      // confirmation page with no path back into the app at all.
       productOptions: {
-        redirectUrl: `${APP_URL}/client/dashboard`,
+        redirectUrl,
         receiptButtonText: 'Go to Dashboard',
         receiptThankYouNote: "Your wallet has been topped up — you're ready to connect with an interpreter.",
       },
