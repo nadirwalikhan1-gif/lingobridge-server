@@ -4,6 +4,12 @@ import { logger } from '../config/logger.mjs';
 
 lemonSqueezySetup({ apiKey: process.env.LEMONSQUEEZY_API_KEY });
 
+// FIX: base URL for the post-checkout redirect. Separate from
+// ALLOWED_ORIGINS (server.mjs) on purpose — that's a CORS whitelist that
+// can hold several comma-separated origins (prod, localhost, preview
+// deploys), not a single canonical URL suitable for a redirect target.
+const APP_URL = process.env.APP_URL || 'https://www.andiraw.com';
+
 /**
  * Create a checkout URL for wallet top-up
  * @param {string} userId
@@ -31,6 +37,15 @@ export async function createCheckout(userId, amount, currency = 'USD') {
           amount:   amount.toString(),
           currency,
         },
+      },
+      // FIX: previously missing entirely — without this, LemonSqueezy has
+      // no way to know where to send the customer after a successful
+      // payment, so they were left stranded on LemonSqueezy's own generic
+      // confirmation page with no path back into the app at all.
+      productOptions: {
+        redirectUrl: `${APP_URL}/client/dashboard`,
+        receiptButtonText: 'Go to Dashboard',
+        receiptThankYouNote: "Your wallet has been topped up — you're ready to connect with an interpreter.",
       },
     }
   );
