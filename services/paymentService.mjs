@@ -56,6 +56,18 @@ export async function createCheckout(userId, amount, currency = 'USD', returnTo)
         receiptButtonText: 'Go to Dashboard',
         receiptThankYouNote: "Your wallet has been topped up — you're ready to connect with an interpreter.",
       },
+      // FIX: added now that checkout opens as an in-page overlay
+      // (src/lib/lemonSqueezy.js) rather than a full-page redirect on most
+      // browsers — embed:true trims chrome meant for a standalone checkout
+      // page (redundant when it's already framed inside our own overlay).
+      // redirectUrl above is still used as-is by the graceful fallback
+      // path (plain window.location.href redirect) when Lemon.js can't
+      // load, so it stays regardless of which path a given browser takes.
+      checkoutOptions: {
+        embed: true,
+        media: false,
+        logo: true,
+      },
     }
   );
 
