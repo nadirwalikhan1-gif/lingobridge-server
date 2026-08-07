@@ -29,6 +29,23 @@ const SCHEMAS = {
     language:  (v) => typeof v !== 'string' || !v.trim() ? 'must be a non-empty string' : null,
     type:      (v) => !['audio', 'video'].includes(v)    ? 'must be "audio" or "video"'  : null,
   },
+  // NEW — real-time messaging. join/leave scope a socket to a specific
+  // conversation's room (membership validated server-side in
+  // messageHandler.mjs before the join actually happens — conversationId
+  // alone isn't enough to trust here, same principle as every other
+  // handler in this file). typing/stop-typing reuse the same shape.
+  'join-conversation': {
+    conversationId: (v) => typeof v !== 'string' || !v.trim() ? 'must be a non-empty string' : null,
+  },
+  'leave-conversation': {
+    conversationId: (v) => typeof v !== 'string' || !v.trim() ? 'must be a non-empty string' : null,
+  },
+  'typing': {
+    conversationId: (v) => typeof v !== 'string' || !v.trim() ? 'must be a non-empty string' : null,
+  },
+  'stop-typing': {
+    conversationId: (v) => typeof v !== 'string' || !v.trim() ? 'must be a non-empty string' : null,
+  },
 };
 
 export function validateEvent(eventName, data) {

@@ -8,6 +8,8 @@ import { endCallHandler }   from './handlers/endCallHandler.mjs';
 import { callInfoHandler } from './handlers/callInfoHandler.mjs';
 import { registerSessionHandlers } from './handlers/sessionHandlers.mjs'; // NEW
 import { interpreterDashboardHandler } from './handlers/interpreterDashboardHandler.mjs'; // NEW
+import { messageHandler } from './handlers/messageHandler.mjs'; // NEW — real-time messaging
+import { emitToUser } from '../utils/socketUtils.mjs';
 import { logger }           from '../config/logger.mjs';
 import { getRedisClient, isRedisAvailable } from '../config/redis.mjs';
 import { eventBus, EVENTS } from '../utils/eventBus.mjs';
@@ -110,6 +112,7 @@ export async function createSocketServer(httpServer) {
     callInfoHandler(io, socket);
     registerSessionHandlers(io, socket); // NEW
     interpreterDashboardHandler(io, socket); // NEW
+    messageHandler(io, socket); // NEW — join/leave conversation rooms, typing indicators
   });
 
   // ── Real-time wallet balance push ─────────────────────────
@@ -140,6 +143,18 @@ export async function createSocketServer(httpServer) {
       detail:   `${userName} added ${currency} ${amount}`,
       time:     new Date().toISOString(),
     });
+  });
+
+  // ── Real-time message delivery ────────────────────────────
+  // routes/v1.mjs emits this after successfully persisting a message —
+  // persistence and delivery are deliberately decoupled (see
+  // messageHandler.mjs's header comment for why). Pushed to every
+  // connected socket the recipient has open, same emitToUser pattern
+  // already used for wallet pushes, so it reaches them app-wide rather
+  // than only if they happen to have the right conversation thread open.
+  eventBus.on(EVENTS.MESSAGE_SENT, ({ conversationId, message, senderId, recipientId }) => {
+    const pushed = emitToUser(io, recipientId, 'new-message', { conversationId, message });
+    logger.info({ conversationId, senderId, recipientId, pushed }, 'Message delivered in real time');
   });
 
   // NEW: Start vault-model billing loops

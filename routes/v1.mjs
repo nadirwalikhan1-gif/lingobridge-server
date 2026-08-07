@@ -8,6 +8,7 @@ import { createSupportTicket } from '../db/supportTicketRepo.mjs';
 import { sendEmail } from '../services/notificationService.mjs';
 import { logger } from '../config/logger.mjs';
 import { strictLimiter } from '../middleware/rateLimiter.mjs';
+import { eventBus, EVENTS } from '../utils/eventBus.mjs';
 
 const router = Router();
 
@@ -1730,9 +1731,13 @@ router.post('/conversations/:id/messages', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'Message cannot be empty' });
     }
 
+    // FIX: select expanded to include interpreter_id — previously only
+    // client_id was fetched, which was enough for the ownership check but
+    // left no way to know who the OTHER party in the conversation is. The
+    // real-time push below needs that to know who to deliver to.
     const { data: convo } = await supabaseAdmin
       .from('conversations')
-      .select('id, client_id')
+      .select('id, client_id, interpreter_id')
       .eq('id', id)
       .single();
 
@@ -1758,6 +1763,19 @@ router.post('/conversations/:id/messages', requireAuth, async (req, res) => {
       .from('conversations')
       .update({ updated_at: new Date().toISOString() })
       .eq('id', id);
+
+    // FIX: this is the actual gap that made Messages non-real-time. The
+    // message was always persisted correctly — nothing told the recipient
+    // it had arrived. socket/index.mjs listens for this and pushes to the
+    // recipient's user:{id} room (same room already used for cross-tab
+    // wallet balance pushes), reaching them regardless of which page
+    // they're currently on, not just an open conversation thread.
+    eventBus.emit(EVENTS.MESSAGE_SENT, {
+      conversationId: id,
+      message:         data,
+      senderId:        req.user.id,
+      recipientId:     convo.interpreter_id,
+    });
 
     res.json({ data });
   } catch (err) {

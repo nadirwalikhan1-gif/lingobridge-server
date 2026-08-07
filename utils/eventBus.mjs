@@ -15,4 +15,5 @@ export const EVENTS = {
   WALLET_CREDITED:        'wallet.credited',
   RESERVATION_RELEASED:   'wallet.reservation_released',
   WALLET_TOPPED_UP:       'wallet.topped_up', // NEW — specifically real completed payments, distinct from WALLET_CREDITED (also fires on reservation releases)
+  MESSAGE_SENT:           'message.sent', // NEW — real-time delivery notification, separate from the actual persistence (routes/v1.mjs still owns writing to the messages table; this just tells socket/index.mjs who to push to)
 };
