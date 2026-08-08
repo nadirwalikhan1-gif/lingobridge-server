@@ -30,6 +30,7 @@ export const AUDIT_ACTIONS = {
   RESERVATION_RELEASED:'wallet.reservation_released',
   CHECKOUT_CREATED:    'payment.checkout_created',
   WEBHOOK_RECEIVED:    'payment.webhook_received',
+  DISCOUNT_PASS_ACTIVATED: 'discount_pass.activated',
   AUTH_LOGIN:          'auth.login',
   AUTH_LOGOUT:         'auth.logout',
 };

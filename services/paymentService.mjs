@@ -1,5 +1,5 @@
 import { lemonSqueezySetup, createCheckout as lsCreateCheckout } from '@lemonsqueezy/lemonsqueezy.js';
-import { TOPUP_AMOUNTS, LEMON_VARIANTS } from '../utils/constants.mjs';
+import { TOPUP_AMOUNTS, LEMON_VARIANTS, DISCOUNT_PASS_PRICE_USD, DISCOUNT_PASS_PCT } from '../utils/constants.mjs';
 import { logger } from '../config/logger.mjs';
 
 lemonSqueezySetup({ apiKey: process.env.LEMONSQUEEZY_API_KEY });
@@ -78,11 +78,74 @@ export async function createCheckout(userId, amount, currency = 'USD', returnTo)
 
   return data?.data?.attributes?.url;
 }
+
+/**
+ * Create a checkout URL for the 30-day discount pass — a fixed $99
+ * one-time charge, distinct from wallet top-ups (doesn't touch wallet
+ * balance at all; db/discountPassRepo.mjs handles activation separately).
+ *
+ * REQUIRES: a real one-time-payment product created in the LemonSqueezy
+ * dashboard for this specific $99 pass — this is NOT one of the existing
+ * wallet top-up variants (LEMON_VARIANTS), those credit the wallet, this
+ * doesn't. Set that product's variant ID as LEMONSQUEEZY_VARIANT_DISCOUNT_PASS
+ * in Railway before this can create real checkouts.
+ *
+ * @param {string} userId
+ * @param {string} [returnTo] — validated relative path (see routes/discountPass.mjs)
+ */
+export async function createDiscountPassCheckout(userId, returnTo) {
+  const variantId = process.env.LEMONSQUEEZY_VARIANT_DISCOUNT_PASS;
+  if (!variantId) {
+    throw new Error('Discount pass checkout is not configured yet — set LEMONSQUEEZY_VARIANT_DISCOUNT_PASS in Railway.');
+  }
+
+  const path = returnTo || '/client/wallet';
+  const separator = path.includes('?') ? '&' : '?';
+  const redirectUrl = `${APP_URL}${path}${separator}checkout=success`;
+
+  const { data, error } = await lsCreateCheckout(
+    process.env.LEMONSQUEEZY_STORE_ID,
+    variantId,
+    {
+      checkoutData: {
+        custom: {
+          user_id:  userId,
+          amount:   DISCOUNT_PASS_PRICE_USD.toString(),
+          currency: 'USD',
+          // FIX: this is the field processOrderCreated below branches on
+          // to tell a discount-pass purchase apart from a wallet top-up —
+          // without it, the webhook would credit $99 straight into the
+          // wallet instead of activating the pass.
+          type: 'discount_pass',
+        },
+      },
+      productOptions: {
+        redirectUrl,
+        receiptButtonText: 'Go to Dashboard',
+        receiptThankYouNote: `Your ${DISCOUNT_PASS_PCT}% discount pass is active — enjoy reduced rates on every session for the next 30 days.`,
+      },
+      checkoutOptions: {
+        embed: true,
+        media: false,
+        logo: true,
+      },
+    }
+  );
+
+  if (error) {
+    logger.error({ error, userId }, 'LemonSqueezy discount pass checkout creation failed');
+    throw new Error(`Checkout failed: ${error.message}`);
+  }
+
+  return data?.data?.attributes?.url;
+}
 import crypto from 'crypto';
 import { addBalance } from './walletService.mjs';
 import { claimWebhookEvent, releaseWebhookEventClaim } from '../db/webhookEventRepo.mjs';
 import { eventBus, EVENTS } from '../utils/eventBus.mjs';
 import { getUserById } from '../db/userRepo.mjs';
+import { createDiscountPass } from '../db/discountPassRepo.mjs';
+import { audit, AUDIT_ACTIONS } from './auditService.mjs';
 
 /**
  * Verify LemonSqueezy webhook signature
@@ -98,7 +161,8 @@ export function verifyWebhookSignature(rawBody, signature) {
 }
 
 /**
- * Process order_created webhook — credit user wallet.
+ * Process order_created webhook — credit user wallet, or activate a
+ * discount pass, depending on what was actually purchased.
  *
  * FIX: previously called the raw creditWallet(userId, amount, currency, orderId)
  * from db/walletRepo.mjs — wrong signature (currency landed in the vaultType
@@ -109,6 +173,12 @@ export function verifyWebhookSignature(rawBody, signature) {
  * FIX: also adds real idempotency. LemonSqueezy retries on any non-2xx
  * response (by design, per this file's webhook.mjs caller) — without a
  * claim guard, a retried event could credit the same payment twice.
+ *
+ * NEW: branches on custom.type. createDiscountPassCheckout above sets
+ * type: 'discount_pass' specifically so this can tell a $99 discount pass
+ * purchase apart from a wallet top-up — without that flag every discount
+ * pass sale would incorrectly land as $99 of wallet credit instead of
+ * activating the pass.
  */
 export async function processOrderCreated(payload) {
   const custom   = payload?.meta?.custom_data;
@@ -117,6 +187,7 @@ export async function processOrderCreated(payload) {
   const currency = custom?.currency ?? 'USD';
   const orderId  = payload?.data?.id;
   const eventId  = payload?.meta?.event_id ?? orderId;
+  const isDiscountPass = custom?.type === 'discount_pass';
 
   if (!userId || isNaN(amount)) {
     throw new Error('Missing user_id or amount in webhook payload');
@@ -129,7 +200,19 @@ export async function processOrderCreated(payload) {
   }
 
   try {
-    // This webhook only ever handles client wallet top-ups.
+    if (isDiscountPass) {
+      const pass = await createDiscountPass({
+        userId,
+        amountPaid: amount,
+        currency,
+        lemonsqueezyOrderId: orderId,
+      });
+      await audit(userId, AUDIT_ACTIONS.DISCOUNT_PASS_ACTIVATED, { orderId, expiresAt: pass.expires_at });
+      logger.info({ userId, orderId, expiresAt: pass.expires_at }, 'Discount pass activated');
+      return { success: true, type: 'discount_pass' };
+    }
+
+    // Wallet top-up path — unchanged.
     await addBalance(userId, amount, currency, `Top-up — order ${orderId}`, 'client');
 
     const user = await getUserById(userId).catch(() => null);
@@ -140,7 +223,7 @@ export async function processOrderCreated(payload) {
       currency,
     });
 
-    return { success: true };
+    return { success: true, type: 'topup' };
   } catch (err) {
     // Release the claim so a legitimate retry (this failure was transient,
     // not a duplicate) isn't permanently blocked from ever crediting.

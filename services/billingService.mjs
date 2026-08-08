@@ -26,6 +26,7 @@ import {
   INTERPRETER_HOLD_RATE,
   HOLD_TIERS,
   PLATFORM_VAULT_ID,
+  applyDiscount,
 } from '../utils/constants.mjs';
 
 // ─── Internal helpers ──────────────────────────────────────────────────────────
@@ -40,9 +41,16 @@ import {
  * @param {number} priorHoldSeconds  Cumulative hold seconds before this tick
  * @param {number} tickSeconds       Duration of this tick (normally 60)
  * @param {string} sessionType       'audio' | 'video'
+ * @param {number} [discountPct]     Client's active discount pass %, if any.
+ *   Applied ONLY to the uncapped (upTo: Infinity) tier — that's the one
+ *   explicitly documented as "client pays full active rate", so a
+ *   discounted client's "full active rate" is their discounted rate. The
+ *   earlier flat tiers ($0 grace period, $0.65/$0.75 mid-tier) are
+ *   platform-set grace pricing, not a restatement of the active rate, and
+ *   deliberately don't scale with the discount.
  * @returns {number} Dollar amount to charge the client (4 decimal precision)
  */
-function holdClientCharge(priorHoldSeconds, tickSeconds, sessionType) {
+function holdClientCharge(priorHoldSeconds, tickSeconds, sessionType, discountPct = 0) {
   const tiers = HOLD_TIERS[sessionType] || HOLD_TIERS.audio;
   let charge  = 0;
   let cursor  = priorHoldSeconds; // seconds into cumulative hold at tick start
@@ -56,7 +64,8 @@ function holdClientCharge(priorHoldSeconds, tickSeconds, sessionType) {
     const secondsInTier   = Math.min(tickSeconds - covered, availableInTier);
     if (secondsInTier <= 0) break;
 
-    charge  += (secondsInTier / 60) * tier.rate;
+    const effectiveRate = tier.upTo === Infinity ? applyDiscount(tier.rate, discountPct) : tier.rate;
+    charge  += (secondsInTier / 60) * effectiveRate;
     covered += secondsInTier;
     cursor  += secondsInTier;
 
@@ -171,8 +180,14 @@ export async function billingTick() {
 
   for (const session of sessions) {
     const currency         = session.currency || 'USD';
-    const clientCharge     = CLIENT_RATES[currency]?.[session.session_type]
+    const baseClientRate   = CLIENT_RATES[currency]?.[session.session_type]
                           ?? CLIENT_RATES.USD[session.session_type];
+    // FIX: discount applied here only. interpreterEarning below is
+    // deliberately computed from the same INTERPRETER_RATES regardless of
+    // the client's discount pct — the platform absorbs the discount
+    // entirely; an interpreter's per-minute payout never changes based on
+    // a promotion their client happens to be enrolled in.
+    const clientCharge     = applyDiscount(baseClientRate, session.client_discount_pct);
     const interpreterEarning = INTERPRETER_RATES[currency]?.[session.session_type]
                             ?? INTERPRETER_RATES.USD[session.session_type];
 
@@ -214,7 +229,7 @@ export async function holdBillingTick() {
     const priorHoldSeconds   = session.total_hold_seconds ?? 0;
     const currency           = session.currency || 'USD';
 
-    const clientCharge       = holdClientCharge(priorHoldSeconds, tickSeconds, session.session_type);
+    const clientCharge       = holdClientCharge(priorHoldSeconds, tickSeconds, session.session_type, session.client_discount_pct);
     const interpreterEarning = parseFloat((INTERPRETER_HOLD_RATE * (tickSeconds / 60)).toFixed(4));
 
     await transferAndLog({

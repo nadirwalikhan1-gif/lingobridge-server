@@ -9,6 +9,8 @@ import { sendEmail } from '../services/notificationService.mjs';
 import { logger } from '../config/logger.mjs';
 import { strictLimiter } from '../middleware/rateLimiter.mjs';
 import { eventBus, EVENTS } from '../utils/eventBus.mjs';
+import { getActiveDiscountPass } from '../db/discountPassRepo.mjs';
+import { CLIENT_RATES, applyDiscount } from '../utils/constants.mjs';
 
 const router = Router();
 
@@ -501,10 +503,34 @@ router.post('/sessions/:id/rate', requireAuth, async (req, res) => {
 router.get('/wallet/balance', requireAuth, async (req, res) => {
   try {
     const wallet = await getAvailableBalance(req.user.id, 'client');
-    res.json(wallet);
+
+    // FIX: added discount pass status + effective rates here rather than a
+    // separate endpoint — every frontend surface that shows pricing
+    // (booking wizard, Wallet page) already fetches this on load, so this
+    // is the one place a discount needs to be exposed for the price
+    // preview to match what billingService.mjs will actually charge.
+    // CLIENT_RATES is fine to use directly for display since it's
+    // documented as "never import into frontend files" — this stays
+    // server-side and only sends the already-computed dollar figures.
+    const pass = await getActiveDiscountPass(req.user.id).catch(() => null);
+    const baseRates = CLIENT_RATES[wallet.currency] ?? CLIENT_RATES.USD;
+    const discountPct = pass?.discount_pct ?? 0;
+
+    res.json({
+      ...wallet,
+      discountPass: pass
+        ? { active: true, discountPct, expiresAt: pass.expires_at }
+        : { active: false },
+      rates: {
+        audio: applyDiscount(baseRates.audio, discountPct),
+        video: applyDiscount(baseRates.video, discountPct),
+        baseAudio: baseRates.audio,
+        baseVideo: baseRates.video,
+      },
+    });
   } catch (err) {
     logger.error({ err }, 'Wallet balance error');
-    res.json({ balance: 0, reservedBalance: 0, availableBalance: 0, currency: 'USD' });
+    res.json({ balance: 0, reservedBalance: 0, availableBalance: 0, currency: 'USD', discountPass: { active: false } });
   }
 });
 

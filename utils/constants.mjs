@@ -40,6 +40,27 @@ export const HOLD_TIERS = {
   ],
 };
 
+// ─── Discount Pass ──────────────────────────────────────────────────────────
+// A 30-day pass giving the client a flat percentage off CLIENT_RATES for
+// both audio and video, purchased as a one-time charge (not a recurring
+// LemonSqueezy subscription — see db/discountPassRepo.mjs for expiry and
+// stacking logic on repeat purchases).
+export const DISCOUNT_PASS_PRICE_USD    = 99;
+export const DISCOUNT_PASS_PCT          = 20;
+export const DISCOUNT_PASS_DURATION_DAYS = 30;
+
+/**
+ * Applies a discount percentage to a base per-minute CLIENT rate.
+ * Deliberately never called on INTERPRETER_RATES anywhere in this codebase
+ * — the platform absorbs the discount entirely; an interpreter's payout
+ * per minute is always the full, undiscounted rate regardless of whether
+ * the client they're serving has an active pass.
+ */
+export function applyDiscount(baseRate, discountPct) {
+  if (!discountPct) return baseRate;
+  return parseFloat((baseRate * (1 - discountPct / 100)).toFixed(4));
+}
+
 // ─── Payout thresholds ─────────────────────────────────────────────────────────
 
 // Interpreter must have at least this much in their vault before requesting payout.

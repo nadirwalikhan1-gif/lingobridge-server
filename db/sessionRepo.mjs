@@ -1,10 +1,20 @@
 import { supabaseAdmin } from '../config/supabase.mjs';
 import { NotFoundError } from '../utils/errors.mjs';
+import { getActiveDiscountPass } from './discountPassRepo.mjs';
 
 /**
  * Create a new session.
  */
 export async function createSession(data) {
+  // FIX: discount is looked up ONCE here and stamped onto the session
+  // record, rather than checked live on every billing tick. Two reasons:
+  // (1) avoids a DB lookup per session per tick in billingTick()'s loop,
+  // and (2) "locks in" the rate the client was quoted at booking time —
+  // if their pass happens to expire mid-call, this specific session still
+  // bills at the rate they saw when they started it, which is the fairer
+  // (and less confusing) behavior.
+  const activePass = await getActiveDiscountPass(data.clientId).catch(() => null);
+
   const { data: session, error } = await supabaseAdmin
     .from('sessions')
     .insert({
@@ -22,6 +32,7 @@ export async function createSession(data) {
       on_hold:            false,
       hold_started_at:    null,
       total_hold_seconds: 0,
+      client_discount_pct: activePass?.discount_pct ?? 0,
     })
     .select()
     .single();
@@ -175,7 +186,7 @@ export async function updateLastBilledAt(sessionId) {
 export async function getActiveBillableSessions() {
   const { data, error } = await supabaseAdmin
     .from('sessions')
-    .select('id, client_id, interpreter_id, session_type, currency, started_at')
+    .select('id, client_id, interpreter_id, session_type, currency, started_at, client_discount_pct')
     .eq('status', 'active')
     .eq('on_hold', false);
 
@@ -190,7 +201,7 @@ export async function getActiveBillableSessions() {
 export async function getHeldSessions() {
   const { data, error } = await supabaseAdmin
     .from('sessions')
-    .select('id, client_id, interpreter_id, session_type, currency, total_hold_seconds, hold_started_at')
+    .select('id, client_id, interpreter_id, session_type, currency, total_hold_seconds, hold_started_at, client_discount_pct')
     .eq('status', 'active')
     .eq('on_hold', true)
     .not('hold_started_at', 'is', null);

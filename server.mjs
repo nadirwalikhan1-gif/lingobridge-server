@@ -30,6 +30,7 @@ import { registerShutdownHandlers } from './utils/shutdown.mjs';
 
 import webhookRouter  from './routes/webhook.mjs';
 import checkoutRouter from './routes/checkout.mjs';
+import discountPassRouter from './routes/discountPass.mjs';
 import agoraRouter    from './routes/agora.mjs';
 import healthRouter   from './routes/health.mjs';
 import v1Router       from './routes/v1.mjs';
@@ -120,6 +121,7 @@ app.get('/health', async (req, res, next) => {
 });
 app.use('/webhook/lemonsqueezy', webhookLimiter, webhookRouter);
 app.use('/create-checkout',      strictLimiter, checkoutRouter);
+app.use('/discount-pass',        strictLimiter, discountPassRouter);
 app.use('/agora',                strictLimiter, agoraRouter);
 app.use('/v1',                   v1Router);
 
