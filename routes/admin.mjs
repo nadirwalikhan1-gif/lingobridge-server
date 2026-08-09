@@ -4,6 +4,7 @@ import { supabaseAdmin, verifySupabaseToken } from '../config/supabase.mjs';
 import { creditWallet } from '../db/walletRepo.mjs';
 import { insertTransaction } from '../db/transactionRepo.mjs';
 import { logger } from '../config/logger.mjs';
+import { getSupportTickets } from '../db/supportTicketRepo.mjs';
 
 const router = Router();
 
@@ -582,6 +583,28 @@ router.get('/transactions', requireAdmin, async (req, res) => {
   } catch (err) {
     logger.error({ err }, 'Admin transactions error');
     res.status(500).json({ error: 'Failed to load transactions' });
+  }
+});
+
+// ── Support Tickets ─────────────────────────────────────────────────────────
+// GET /v1/admin/support-tickets
+// NEW — this is what "any option on the client dashboard meant to reach
+// admin should work" actually needed on the admin side. Every ticket
+// created via the contact form, account deletion request, BAA request, or
+// review report lands here — same shared support_tickets table, same
+// createSupportTicket() function on the writing end. Resolve/reopen are
+// socket-only (admin-resolve-support-ticket / admin-reopen-support-ticket
+// in socket/handlers/adminHandler.mjs) — matching Disputes.jsx's own
+// established pattern of REST for the initial list, socket for mutations,
+// rather than building two separate paths to do the same thing.
+router.get('/support-tickets', requireAdmin, async (req, res) => {
+  try {
+    const { status } = req.query;
+    const tickets = await getSupportTickets({ status });
+    res.json(tickets);
+  } catch (err) {
+    logger.error({ err }, 'Admin support tickets fetch error');
+    res.json([]);
   }
 });
 

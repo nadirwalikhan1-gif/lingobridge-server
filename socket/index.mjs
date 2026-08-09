@@ -157,6 +157,17 @@ export async function createSocketServer(httpServer) {
     logger.info({ conversationId, senderId, recipientId, pushed }, 'Message delivered in real time');
   });
 
+  // ── Real-time support ticket notification ─────────────────
+  // Fires from the ONE shared createSupportTicket() function in
+  // db/supportTicketRepo.mjs — every current creation path (contact form,
+  // account deletion request, BAA request, review report) and any future
+  // one automatically light up the admin dashboard live, without each
+  // call site needing its own push logic.
+  eventBus.on(EVENTS.SUPPORT_TICKET_CREATED, (ticket) => {
+    io.to('admins').emit('new-support-ticket', ticket);
+    logger.info({ ticketId: ticket.id, subject: ticket.subject }, 'Support ticket pushed to admins');
+  });
+
   // NEW: Start vault-model billing loops
   setInterval(billingTick, 60_000);
   setInterval(holdBillingTick, 60_000);

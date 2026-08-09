@@ -16,4 +16,5 @@ export const EVENTS = {
   RESERVATION_RELEASED:   'wallet.reservation_released',
   WALLET_TOPPED_UP:       'wallet.topped_up', // NEW — specifically real completed payments, distinct from WALLET_CREDITED (also fires on reservation releases)
   MESSAGE_SENT:           'message.sent', // NEW — real-time delivery notification, separate from the actual persistence (routes/v1.mjs still owns writing to the messages table; this just tells socket/index.mjs who to push to)
+  SUPPORT_TICKET_CREATED: 'support_ticket.created', // NEW — decouples the 4 different places a ticket can be created (contact form, account deletion, BAA request, review report) from admin notification, so any of them light up the admin dashboard in real time without each call site needing to know that
 };

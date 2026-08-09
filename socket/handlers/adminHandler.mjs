@@ -12,6 +12,7 @@ import { generateAgoraToken } from '../../services/agoraService.mjs';
 import { CLIENT_RATES } from '../../utils/constants.mjs';
 import { emitToUser } from '../../utils/socketUtils.mjs';
 import { eventBus, EVENTS } from '../../utils/eventBus.mjs';
+import { getSupportTickets, updateSupportTicketStatus } from '../../db/supportTicketRepo.mjs';
 
 // Same window used for a client's own preferred-interpreter selection in
 // requestHandler.mjs — kept identical so this reuses that file's existing
@@ -219,6 +220,15 @@ export function registerAdminHandlers(io, socket) {
   socket.on('get-request-queue',        async () => { try { socket.emit('request-queue',        await getRequestQueue());        } catch (e) { logger.error(e, 'request-queue error'); } });
   socket.on('get-interpreter-presence', async () => { try { socket.emit('interpreter-presence', await getInterpreterPresence()); } catch (e) { logger.error(e, 'interpreter-presence error'); } });
   socket.on('get-active-disputes',      async () => { try { socket.emit('active-disputes',      await getActiveDisputes());      } catch (e) { logger.error(e, 'active-disputes error'); } });
+  // NEW — support tickets. Same request/response shape as every other
+  // get-X handler above; status param lets the admin page filter
+  // server-side (defaults to all statuses when omitted, e.g. for the
+  // sidebar badge count which needs every open ticket regardless of what
+  // filter the actual page happens to be showing).
+  socket.on('get-support-tickets', async ({ status } = {}) => {
+    try { socket.emit('support-tickets', await getSupportTickets({ status })); }
+    catch (e) { logger.error(e, 'support-tickets error'); }
+  });
   socket.on('get-payout-queue',         async () => { try { socket.emit('payout-queue',         await getPayoutQueue());         } catch (e) { logger.error(e, 'payout-queue error'); } });
   socket.on('get-alerts',               async () => { try { socket.emit('operational-alerts',   await getAlerts());              } catch (e) { logger.error(e, 'alerts error'); } });
   socket.on('get-system-health',        async () => { try { socket.emit('system-health',        await getSystemHealth());        } catch (e) { logger.error(e, 'system-health error'); } });
@@ -236,6 +246,24 @@ export function registerAdminHandlers(io, socket) {
       await supabaseAdmin.from('disputes').update({ status: 'escalated' }).eq('id', disputeId);
       io.to('admins').emit('dispute-escalated', { id: disputeId });
     } catch (e) { logger.error(e, 'escalate-dispute error'); }
+  });
+
+  // NEW — resolve/reopen a support ticket. Pushed to the whole admins room
+  // (not just this socket) so every admin's sidebar badge and open list
+  // update immediately if more than one admin is online at once — same
+  // reasoning as dispute-resolved/dispute-escalated above.
+  socket.on('admin-resolve-support-ticket', async ({ ticketId }) => {
+    try {
+      await updateSupportTicketStatus(ticketId, 'resolved');
+      io.to('admins').emit('support-ticket-resolved', { id: ticketId });
+    } catch (e) { logger.error(e, 'resolve-support-ticket error'); }
+  });
+
+  socket.on('admin-reopen-support-ticket', async ({ ticketId }) => {
+    try {
+      await updateSupportTicketStatus(ticketId, 'open');
+      io.to('admins').emit('support-ticket-reopened', { id: ticketId });
+    } catch (e) { logger.error(e, 'reopen-support-ticket error'); }
   });
 
   socket.on('admin-approve-payout', async ({ payoutId }) => {
