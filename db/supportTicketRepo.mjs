@@ -1,5 +1,6 @@
 import { supabaseAdmin } from '../config/supabase.mjs';
 import { eventBus, EVENTS } from '../utils/eventBus.mjs';
+import { logger } from '../config/logger.mjs';
 
 /**
  * Create a support ticket.
@@ -42,23 +43,51 @@ export async function getSupportTicketsByUser(userId, limit = 20, offset = 0) {
 }
 
 /**
- * List support tickets for the admin dashboard. Mirrors
- * getActiveDisputes()'s shape in socket/handlers/adminHandler.mjs — same
- * project, same convention, so both admin queue pages behave consistently.
+ * List support tickets for the admin dashboard.
+ *
+ * FIX: previously used PostgREST's relationship-embed syntax
+ * (.select('..., users(full_name, email)')), which depends on Supabase
+ * being able to resolve a foreign key from support_tickets to a table
+ * literally reachable as "users" in the schema. The original migration
+ * pointed that FK at auth.users instead of public.users — a mismatch with
+ * every other table in this app — so the embed silently failed, the error
+ * was caught, and the admin page always showed zero tickets even though
+ * creation and the real-time push were both working. A migration fixes
+ * the FK itself (see migrations/20260810_fix_support_tickets_user_fk.sql),
+ * but this also stops depending on the embed relationship entirely: fetch
+ * tickets first, then batch-resolve names/emails with a plain .in() query
+ * against 'users' directly (same table getUserById() in db/userRepo.mjs
+ * already uses successfully elsewhere). One extra query per page load,
+ * but it can't break the same way again regardless of FK schema changes.
  */
 export async function getSupportTickets({ status } = {}) {
   let query = supabaseAdmin
     .from('support_tickets')
-    .select('id, user_id, role, subject, message, status, created_at, resolved_at, users(full_name, email)')
+    .select('id, user_id, role, subject, message, status, created_at, resolved_at')
     .order('created_at', { ascending: false })
     .limit(100);
 
   if (status && status !== 'all') query = query.eq('status', status);
 
-  const { data, error } = await query;
+  const { data: tickets, error } = await query;
   if (error) throw new Error(`getSupportTickets failed: ${error.message}`);
+  if (!tickets || tickets.length === 0) return [];
 
-  return (data || []).map(t => ({
+  const userIds = [...new Set(tickets.map(t => t.user_id).filter(Boolean))];
+  const { data: users, error: usersError } = await supabaseAdmin
+    .from('users')
+    .select('id, full_name, email')
+    .in('id', userIds);
+
+  if (usersError) {
+    // Don't fail the whole ticket list just because name/email lookup
+    // failed — an admin seeing "Unknown" is far better than seeing
+    // nothing at all, which is exactly the bug this rewrite exists to fix.
+    logger.error({ error: usersError }, 'getSupportTickets: user lookup failed, showing tickets without names');
+  }
+  const userById = new Map((users || []).map(u => [u.id, u]));
+
+  return tickets.map(t => ({
     id:         t.id,
     userId:     t.user_id,
     role:       t.role,
@@ -67,8 +96,8 @@ export async function getSupportTickets({ status } = {}) {
     status:     t.status,
     createdAt:  t.created_at,
     resolvedAt: t.resolved_at,
-    userName:   t.users?.full_name ?? 'Unknown',
-    userEmail:  t.users?.email ?? null,
+    userName:   userById.get(t.user_id)?.full_name ?? 'Unknown',
+    userEmail:  userById.get(t.user_id)?.email ?? null,
   }));
 }
 
