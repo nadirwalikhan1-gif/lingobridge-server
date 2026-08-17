@@ -252,18 +252,30 @@ export function registerAdminHandlers(io, socket) {
   // (not just this socket) so every admin's sidebar badge and open list
   // update immediately if more than one admin is online at once — same
   // reasoning as dispute-resolved/dispute-escalated above.
+  // FIX: previously only logged server-side on failure — the requesting
+  // admin's browser got no signal at all if updateSupportTicketStatus
+  // threw for any reason, so the button stayed stuck on its pending state
+  // forever waiting for a success event that would never arrive. Now
+  // emits an explicit error back to just this socket either way, so the
+  // frontend can clear the pending state and show what actually happened.
   socket.on('admin-resolve-support-ticket', async ({ ticketId }) => {
     try {
       await updateSupportTicketStatus(ticketId, 'resolved');
       io.to('admins').emit('support-ticket-resolved', { id: ticketId });
-    } catch (e) { logger.error(e, 'resolve-support-ticket error'); }
+    } catch (e) {
+      logger.error(e, 'resolve-support-ticket error');
+      socket.emit('support-ticket-action-error', { ticketId, message: e.message || 'Failed to resolve ticket' });
+    }
   });
 
   socket.on('admin-reopen-support-ticket', async ({ ticketId }) => {
     try {
       await updateSupportTicketStatus(ticketId, 'open');
       io.to('admins').emit('support-ticket-reopened', { id: ticketId });
-    } catch (e) { logger.error(e, 'reopen-support-ticket error'); }
+    } catch (e) {
+      logger.error(e, 'reopen-support-ticket error');
+      socket.emit('support-ticket-action-error', { ticketId, message: e.message || 'Failed to reopen ticket' });
+    }
   });
 
   socket.on('admin-approve-payout', async ({ payoutId }) => {
