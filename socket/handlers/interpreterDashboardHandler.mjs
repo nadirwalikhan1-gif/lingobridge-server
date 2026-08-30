@@ -610,7 +610,18 @@ export function interpreterDashboardHandler(io, socket) {
       socket.emit('support-ticket-ack', { ok: true, ticketId: ticket.id });
     } catch (err) {
       logger.error({ err, userId }, 'submit-support-ticket failed');
-      socket.emit('support-ticket-ack', { ok: false, reason: 'server_error' });
+      // FIX: was reason: 'server_error' — a deliberately opaque string
+      // that told the person submitting (and whoever's debugging on their
+      // behalf) nothing at all about what actually broke. The full error
+      // is still logged server-side above; this also puts a truncated
+      // version of the real message in the ack itself, so the underlying
+      // cause is visible immediately in the browser rather than requiring
+      // Railway log access to even start diagnosing.
+      socket.emit('support-ticket-ack', {
+        ok: false,
+        reason: 'server_error',
+        detail: String(err?.message || err).slice(0, 300),
+      });
     }
   });
 }
